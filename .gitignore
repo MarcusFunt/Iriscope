@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Local capture data can contain biometric images.
+captures/
+calibration/
+datasets/
+analysis-runs/
+*.zip
+*.dng
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+!tests/fixtures/**/*.jpg
+!tests/fixtures/**/*.png
+!web/public/**/*.png
+
+# Local machine config may contain hostnames or usernames.
+.iriscope.toml
+
+# Frontend dependencies and build output.
+web/node_modules/
+web/dist/

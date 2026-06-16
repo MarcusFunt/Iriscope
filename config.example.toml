@@ -1,0 +1,21 @@
+[pi]
+host = "raspberrypi.local"
+user = "pi"
+port = 22
+remote_root = "/home/pi/iriscope"
+# ssh_key = "C:/Users/you/.ssh/id_ed25519"
+
+[capture]
+count = 12
+shutter_us = 8000
+gain = 1.0
+awb_gains = [1.8, 1.4]
+denoise = "off"
+quality = 95
+nopreview = true
+
+[processing]
+stack_method = "sigma"
+sigma = 2.5
+min_frames = 3
+save_intermediates = true

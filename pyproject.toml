@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iriscope"
+version = "0.1.0"
+description = "Tethered Raspberry Pi HQ camera iris capture and local enhancement pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Iriscope" }]
+dependencies = [
+  "imageio>=2.34",
+  "numpy>=1.26",
+  "opencv-contrib-python>=4.8",
+  "pillow>=10",
+  "rawpy>=0.21",
+  "rich>=13",
+  "scikit-image>=0.22",
+  "scipy>=1.11",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+ssh = ["paramiko>=3.4"]
+web = [
+  "fastapi>=0.115",
+  "pyserial>=3.5",
+  "uvicorn[standard]>=0.30",
+]
+dev = ["pytest>=8"]
+
+[project.scripts]
+iriscope = "iriscope.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["iriscope*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
