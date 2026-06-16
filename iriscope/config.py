@@ -7,7 +7,10 @@ from typing import Any
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 
 DEFAULT_CONFIG_PATH = Path(".iriscope.toml")
@@ -65,7 +68,7 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
     if not config_path.exists():
         return ProjectConfig()
     if tomllib is None:
-        raise RuntimeError("TOML config files require Python 3.11+.")
+        raise RuntimeError("TOML config files require Python 3.11+ or the `tomli` package.")
     with config_path.open("rb") as handle:
         data = tomllib.load(handle)
     return ProjectConfig(

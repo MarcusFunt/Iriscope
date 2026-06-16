@@ -21,6 +21,7 @@ export type StatusResponse = {
   };
   config: {
     exists: boolean;
+    path: string;
     pi_host: string | null;
     pi_user: string;
     remote_root: string;
@@ -82,4 +83,13 @@ export type LabelRecord = {
   tags: string[];
   notes: string;
   updated_at: string | null;
+};
+
+export type ProcessResponse = {
+  ok: boolean;
+  output_dir: string;
+  enhanced_jpg: string;
+  enhanced_tif: string;
+  report_json: string;
+  contact_sheet: string;
 };

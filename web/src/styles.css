@@ -199,6 +199,7 @@ nav {
 }
 
 .preprocess-panel,
+.output-panel,
 .label-panel,
 .log-panel {
   min-height: 300px;
@@ -364,7 +365,8 @@ nav {
 }
 
 .primary,
-.secondary {
+.secondary,
+.link-button {
   min-height: 40px;
   display: inline-flex;
   align-items: center;
@@ -375,6 +377,7 @@ nav {
   padding: 0 14px;
   font-size: 13px;
   font-weight: 650;
+  text-decoration: none;
 }
 
 .primary {
@@ -386,6 +389,12 @@ nav {
   color: #dce6e4;
   background: #20272a;
   border-color: #364246;
+}
+
+.link-button {
+  color: #dce6e4;
+  background: #151b1d;
+  border-color: #303b3f;
 }
 
 .primary:disabled,
@@ -449,6 +458,34 @@ nav {
   color: #bdc8c7;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.output-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.output-image {
+  margin: 0;
+  border: 1px solid #2a3336;
+  border-radius: 8px;
+  background: #111517;
+  overflow: hidden;
+}
+
+.output-image img {
+  width: 100%;
+  height: 136px;
+  object-fit: cover;
+  display: block;
+  background: #080a0b;
+}
+
+.output-image figcaption {
+  padding: 8px 10px;
+  color: #aeb8ba;
+  font-size: 12px;
 }
 
 .checkbox-line {

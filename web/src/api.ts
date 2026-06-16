@@ -1,4 +1,4 @@
-import type { LabelRecord, PreprocessReport, SessionRecord, StatusResponse } from "./types";
+import type { LabelRecord, PreprocessReport, ProcessResponse, SessionRecord, StatusResponse } from "./types";
 
 type ApiErrorPayload = {
   detail?: string;
@@ -33,6 +33,20 @@ export function preprocessSession(sessionDir: string, maxFrames = 16) {
   });
 }
 
+export function processSession(sessionDir: string) {
+  return apiPost<ProcessResponse>("/api/process", {
+    session_dir: sessionDir,
+    stack_method: "sigma",
+    sigma: 2.5,
+    min_frames: 3,
+  });
+}
+
+export function getLabel(sessionDir: string) {
+  const params = new URLSearchParams({ session_dir: sessionDir });
+  return apiGet<{ ok: boolean; label: LabelRecord }>(`/api/label?${params.toString()}`);
+}
+
 export function saveLabel(sessionDir: string, label: LabelRecord) {
   return apiPost<{ ok: boolean; label: LabelRecord }>("/api/label", {
     ...label,
@@ -43,6 +57,16 @@ export function saveLabel(sessionDir: string, label: LabelRecord) {
 export function snapshotUrl(deviceName: string, nonce: number) {
   const params = new URLSearchParams({ device: deviceName, t: String(nonce) });
   return `/api/uvc/snapshot?${params.toString()}`;
+}
+
+export function artifactUrl(path: string) {
+  const params = new URLSearchParams({ path });
+  return `/api/artifact?${params.toString()}`;
+}
+
+export function reviewUrl(sessionDir: string) {
+  const params = new URLSearchParams({ session_dir: sessionDir });
+  return `/api/review?${params.toString()}`;
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {

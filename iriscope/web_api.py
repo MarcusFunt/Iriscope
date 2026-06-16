@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import mimetypes
+import os
 import platform
 import shutil
 import subprocess
@@ -11,6 +13,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from .capture import (
     build_rpicam_command,
@@ -25,14 +28,17 @@ from .processing import IMAGE_SUFFIXES, find_input_images, process_session
 try:
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, HTMLResponse
     from pydantic import BaseModel, Field
 except ModuleNotFoundError as exc:  # pragma: no cover - import-time guidance
     raise RuntimeError("The web API requires `pip install -e .[web]`.") from exc
 
 
-PROJECT_ROOT = Path.cwd()
-CAPTURES_ROOT = PROJECT_ROOT / "captures"
+DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(os.environ.get("IRISCOPE_PROJECT_ROOT", DEFAULT_PROJECT_ROOT)).expanduser().resolve()
+CONFIG_PATH = PROJECT_ROOT / ".iriscope.toml"
+CAPTURES_ROOT = Path(os.environ.get("IRISCOPE_CAPTURES_ROOT", PROJECT_ROOT / "captures")).expanduser().resolve()
+ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | {".json", ".html", ".csv", ".txt"}
 
 
 class CaptureRequest(BaseModel):
@@ -88,7 +94,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
-        config = load_config()
+        config = load_config(CONFIG_PATH)
         return {
             "platform": {
                 "system": platform.system(),
@@ -96,7 +102,8 @@ def create_app() -> FastAPI:
                 "python": platform.python_version(),
             },
             "config": {
-                "exists": Path(".iriscope.toml").exists(),
+                "exists": CONFIG_PATH.exists(),
+                "path": str(CONFIG_PATH),
                 "pi_host": config.pi.host,
                 "pi_user": config.pi.user,
                 "remote_root": config.pi.remote_root,
@@ -126,7 +133,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/calibrate")
     async def calibrate() -> dict[str, Any]:
-        config = load_config()
+        config = load_config(CONFIG_PATH)
         example = " ".join(build_rpicam_command("test.jpg", config.capture, "test.json"))
         if not config.pi.host:
             return {
@@ -143,7 +150,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/capture")
     async def capture(request: CaptureRequest) -> dict[str, Any]:
-        config = load_config()
+        config = load_config(CONFIG_PATH)
         if not config.pi.host:
             raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
         awb = None
@@ -220,13 +227,44 @@ def create_app() -> FastAPI:
     @app.post("/api/label")
     async def save_session_label(request: LabelRequest) -> dict[str, Any]:
         root = _resolve_local_path(request.session_dir)
-        data = request.model_dump()
+        data = _model_data(request)
         data.pop("session_dir", None)
         try:
             record = await asyncio.to_thread(save_label, root, data)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True, "label": record}
+
+    @app.get("/api/artifact")
+    async def artifact(path: str) -> FileResponse:
+        try:
+            artifact_path = _resolve_artifact_path(path)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        media_type = mimetypes.guess_type(artifact_path.name)[0] or "application/octet-stream"
+        return FileResponse(artifact_path, media_type=media_type, filename=artifact_path.name)
+
+    @app.get("/api/review")
+    async def review(session_dir: str) -> HTMLResponse:
+        from .review import generate_review, resolve_processed_dir
+
+        root = _resolve_local_path(session_dir)
+        try:
+            html_path = await asyncio.to_thread(generate_review, root, False)
+            processed = resolve_processed_dir(root)
+            text = html_path.read_text(encoding="utf-8")
+            report = _read_report(processed / "report.json") or {}
+            for output_path in (report.get("outputs") or {}).values():
+                if not output_path:
+                    continue
+                output = Path(output_path)
+                text = text.replace(
+                    f'src="{output.name}"',
+                    f'src="{_artifact_href(output)}"',
+                )
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return HTMLResponse(text)
 
     return app
 
@@ -408,7 +446,14 @@ def _list_sessions() -> list[dict[str, Any]]:
     for path in sorted(CAPTURES_ROOT.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
         if not path.is_dir():
             continue
-        report = _read_report(path / "processed" / "report.json")
+        report_path = path / "processed" / "report.json"
+        report = _read_report(report_path)
+        outputs = dict(report.get("outputs", {}) if report else {})
+        if report:
+            outputs["report_json"] = str(report_path)
+            review_path = path / "processed" / "review.html"
+            if review_path.exists():
+                outputs["review_html"] = str(review_path)
         inputs = find_input_images(path)
         sessions.append(
             {
@@ -419,7 +464,7 @@ def _list_sessions() -> list[dict[str, Any]]:
                 "processed": report is not None,
                 "labeled": (path / "iriscope_labels.json").exists(),
                 "preprocessed": (path / "preprocess_report.json").exists(),
-                "outputs": report.get("outputs", {}) if report else {},
+                "outputs": outputs,
             }
         )
     return sessions[:40]
@@ -444,3 +489,37 @@ def _resolve_local_path(value: str) -> Path:
     if resolved.is_file() and resolved.suffix.lower() in IMAGE_SUFFIXES:
         return resolved.parent
     return resolved
+
+
+def _resolve_artifact_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    resolved = path.resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Path does not exist: {resolved}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Path is not a file: {resolved}")
+    if resolved.suffix.lower() not in ARTIFACT_SUFFIXES:
+        raise ValueError(f"Unsupported artifact type: {resolved.suffix}")
+    if not _is_relative_to(resolved, CAPTURES_ROOT):
+        raise ValueError(f"Artifact is outside the capture root: {resolved}")
+    return resolved
+
+
+def _artifact_href(path: str | Path) -> str:
+    return f"/api/artifact?path={quote(str(path), safe='')}"
+
+
+def _model_data(model: BaseModel) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False

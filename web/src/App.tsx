@@ -22,8 +22,19 @@ import {
   Tag,
   Terminal,
 } from "lucide-react";
-import { apiPost, getSessions, getStatus, preprocessSession, saveLabel, snapshotUrl } from "./api";
-import type { LabelRecord, PreprocessReport, SessionRecord, StatusResponse } from "./types";
+import {
+  apiPost,
+  artifactUrl,
+  getLabel,
+  getSessions,
+  getStatus,
+  preprocessSession,
+  processSession,
+  reviewUrl,
+  saveLabel,
+  snapshotUrl,
+} from "./api";
+import type { LabelRecord, PreprocessReport, ProcessResponse, SessionRecord, StatusResponse } from "./types";
 
 type CaptureForm = {
   subject: string;
@@ -41,6 +52,11 @@ type LogItem = {
   message: string;
 };
 
+type ProcessedOutputState = {
+  sessionDir: string;
+  result: ProcessResponse;
+};
+
 const defaultCapture: CaptureForm = {
   subject: "S001",
   eye: "left",
@@ -52,8 +68,8 @@ const defaultCapture: CaptureForm = {
 };
 
 const defaultLabel: LabelRecord = {
-  subject_code: "S001",
-  eye: "left",
+  subject_code: "",
+  eye: "",
   consent_recorded: false,
   biometric_category: "iris_visible_light",
   allowed_use: "local_enhancement_only",
@@ -73,8 +89,10 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedSession, setSelectedSession] = useState("");
   const [capture, setCapture] = useState<CaptureForm>(defaultCapture);
+  const [captureHydrated, setCaptureHydrated] = useState(false);
   const [label, setLabel] = useState<LabelRecord>(defaultLabel);
   const [preprocess, setPreprocess] = useState<PreprocessReport | null>(null);
+  const [processedOutput, setProcessedOutput] = useState<ProcessedOutputState | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([
     { time: now(), level: "info", message: "Iriscope host interface ready." },
   ]);
@@ -91,17 +109,45 @@ export default function App() {
       const [nextStatus, nextSessions] = await Promise.all([getStatus(), getSessions()]);
       setStatus(nextStatus);
       setSessions(nextSessions);
+      if (!captureHydrated) {
+        setCapture(captureFromStatus(nextStatus));
+        setCaptureHydrated(true);
+      }
       if (!selectedSession && nextSessions[0]) {
         setSelectedSession(nextSessions[0].path);
       }
     } catch (error) {
       appendLog("error", errorMessage(error));
     }
-  }, [appendLog, selectedSession]);
+  }, [appendLog, captureHydrated, selectedSession]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const listedSession = sessions.some((session) => session.path === selectedSession);
+    if (!selectedSession || !listedSession) {
+      return;
+    }
+
+    let cancelled = false;
+    void getLabel(selectedSession)
+      .then((result) => {
+        if (!cancelled) {
+          setLabel(withSessionFallback(result.label, selectedSession));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          appendLog("warn", `Label load failed: ${errorMessage(error)}`);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appendLog, selectedSession, sessions]);
 
   const cameraName = useMemo(() => {
     const devices = status?.camera_devices ?? [];
@@ -113,6 +159,23 @@ export default function App() {
 
   const piReady = Boolean(status?.config.pi_host);
   const serialPort = status?.serial_ports.find((port) => port === "COM22") ?? status?.serial_ports[0] ?? "not detected";
+  const selectedRecord = useMemo(
+    () => sessions.find((session) => session.path === selectedSession),
+    [selectedSession, sessions],
+  );
+  const outputPaths = useMemo(() => {
+    const base = selectedRecord?.outputs ?? {};
+    if (processedOutput?.sessionDir !== selectedSession) {
+      return base;
+    }
+    return {
+      ...base,
+      enhanced_jpg: processedOutput.result.enhanced_jpg,
+      enhanced_tif: processedOutput.result.enhanced_tif,
+      report_json: processedOutput.result.report_json,
+      contact_sheet: processedOutput.result.contact_sheet,
+    };
+  }, [processedOutput, selectedRecord, selectedSession]);
 
   async function runAction<T>(name: string, action: () => Promise<T>, onSuccess?: (result: T) => void) {
     setBusy(name);
@@ -184,7 +247,6 @@ export default function App() {
             selectedSession={selectedSession}
             onSelect={(session) => {
               setSelectedSession(session.path);
-              setLabel((current) => ({ ...current, subject_code: session.name.split("_")[0] || current.subject_code }));
             }}
           />
 
@@ -199,15 +261,16 @@ export default function App() {
               })
             }
             onProcess={() =>
-              runAction("Process", () =>
-                apiPost("/api/process", {
-                  session_dir: selectedSession,
-                  stack_method: "sigma",
-                  sigma: 2.5,
-                  min_frames: 3,
-                }),
-              )
+              runAction("Process", () => processSession(selectedSession), (result) => {
+                setProcessedOutput({ sessionDir: selectedSession, result });
+              })
             }
+          />
+
+          <OutputPanel
+            sessionDir={selectedSession}
+            outputs={outputPaths}
+            processed={Boolean(selectedRecord?.processed || processedOutput?.sessionDir === selectedSession)}
           />
 
           <LabelPanel
@@ -441,6 +504,67 @@ function PreprocessPanel({
   );
 }
 
+function OutputPanel({
+  sessionDir,
+  outputs,
+  processed,
+}: {
+  sessionDir: string;
+  outputs: Record<string, string | null | undefined>;
+  processed: boolean;
+}) {
+  const enhanced = outputPath(outputs, "enhanced_jpg");
+  const contactSheet = outputPath(outputs, "contact_sheet");
+  const mask = outputPath(outputs, "iris_mask");
+  const report = outputPath(outputs, "report_json");
+  const enhancedTif = outputPath(outputs, "enhanced_tif");
+  const hasPreview = Boolean(enhanced || contactSheet || mask);
+
+  return (
+    <section className="panel output-panel">
+      <PanelTitle icon={<FolderOpen size={18} />} title="Output Review" actionLabel={processed ? "processed" : "not processed"} />
+      {!hasPreview ? <p className="empty">No processed outputs for the selected session.</p> : null}
+      {hasPreview ? (
+        <div className="output-grid">
+          {enhanced ? <OutputImage label="Enhanced" path={enhanced} /> : null}
+          {contactSheet ? <OutputImage label="Contact sheet" path={contactSheet} /> : null}
+          {mask ? <OutputImage label="Mask" path={mask} /> : null}
+        </div>
+      ) : null}
+      <div className="button-row">
+        <button
+          className="secondary"
+          type="button"
+          disabled={!processed || !sessionDir}
+          onClick={() => window.open(reviewUrl(sessionDir), "_blank", "noopener,noreferrer")}
+        >
+          <Sparkles size={17} />
+          Open Review
+        </button>
+        {report ? (
+          <a className="link-button" href={artifactUrl(report)} target="_blank" rel="noreferrer">
+            Report JSON
+          </a>
+        ) : null}
+        {enhancedTif ? (
+          <a className="link-button" href={artifactUrl(enhancedTif)} target="_blank" rel="noreferrer">
+            Master TIFF
+          </a>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function OutputImage({ label, path }: { label: string; path: string }) {
+  return (
+    <figure className="output-image">
+      <img src={artifactUrl(path)} alt={label} />
+      <figcaption>{label}</figcaption>
+    </figure>
+  );
+}
+
 function LabelPanel({
   label,
   setLabel,
@@ -588,4 +712,32 @@ function now() {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function captureFromStatus(status: StatusResponse): CaptureForm {
+  const capture = status.config.capture;
+  return {
+    subject: defaultCapture.subject,
+    eye: defaultCapture.eye,
+    count: capture.count,
+    shutter_us: capture.shutter_us,
+    gain: capture.gain,
+    awb_red: Number(capture.awb_gains[0] ?? defaultCapture.awb_red),
+    awb_blue: Number(capture.awb_gains[1] ?? defaultCapture.awb_blue),
+  };
+}
+
+function withSessionFallback(label: LabelRecord, sessionDir: string): LabelRecord {
+  const sessionName = sessionDir.split(/[\\/]/).filter(Boolean).at(-1) ?? "";
+  const parts = sessionName.split("_");
+  const inferredEye = parts.includes("left") ? "left" : parts.includes("right") ? "right" : "";
+  return {
+    ...label,
+    subject_code: label.subject_code || parts[0] || "",
+    eye: label.eye || inferredEye,
+  };
+}
+
+function outputPath(outputs: Record<string, string | null | undefined>, key: string) {
+  return outputs[key] || "";
 }
