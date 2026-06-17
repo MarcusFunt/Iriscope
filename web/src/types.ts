@@ -13,6 +13,16 @@ export type CaptureSettings = {
   command_preview: string;
 };
 
+export type PreviewSettings = {
+  width: number;
+  height: number;
+  framerate: number;
+  quality: number;
+  stream_timeout_s: number;
+  command_preview: string;
+  media_type: string;
+};
+
 export type StatusResponse = {
   platform: {
     system: string;
@@ -26,6 +36,7 @@ export type StatusResponse = {
     pi_user: string;
     remote_root: string;
     capture: CaptureSettings;
+    preview: PreviewSettings;
     processing: Record<string, unknown>;
   };
   tools: ToolStatus;

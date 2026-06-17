@@ -47,6 +47,14 @@ chmod +x /tmp/setup-iriscope-pi.sh
 sudo /tmp/setup-iriscope-pi.sh
 ```
 
+To use a wired preview/control link instead of Wi-Fi, enable USB Ethernet gadget mode during provisioning:
+
+```bash
+sudo /tmp/setup-iriscope-pi.sh --enable-usb-ethernet --usb-ip 10.42.0.2
+```
+
+After reboot, connect the computer to the Pi Zero **USB/data** port, not the PWR-only port. Configure the computer-side USB/RNDIS interface with an address on the same subnet, for example `10.42.0.1/24`, then use `10.42.0.2` as the Iriscope Pi host.
+
 Reboot:
 
 ```bash
@@ -79,6 +87,15 @@ Set `.iriscope.toml` on your computer to match the Pi:
 ```toml
 [pi]
 host = "iriscope-pi.local"
+user = "<user>"
+remote_root = "/home/<user>/iriscope"
+```
+
+For USB Ethernet gadget mode, use the static USB-side address instead:
+
+```toml
+[pi]
+host = "10.42.0.2"
 user = "<user>"
 remote_root = "/home/<user>/iriscope"
 ```

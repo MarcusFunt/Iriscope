@@ -124,10 +124,24 @@ Open `http://127.0.0.1:5173`.
 The GUI provides:
 
 - local device/dependency status, including COM port, UVC camera, SSH config, and Python dependencies
-- UVC preview snapshots for the current USB camera
+- live Pi HQ camera preview streamed through `rpicam-vid` over SSH, with still snapshot fallback
+- UVC preview snapshots for a directly attached USB camera when no Pi host is configured
 - capture controls for subject, eye, frame count, shutter, gain, and AWB gains
 - pre-processing inspection that writes `preprocess_report.json`
 - processing controls for the existing stacking/enhancement pipeline
 - biometric label sidecars written as `iriscope_labels.json`
+
+For the most reliable preview, run the Pi Zero as a USB Ethernet gadget and set `[pi].host` to the USB-side address, for example `10.42.0.2`. The preview stream uses the `[preview]` config section:
+
+```toml
+[preview]
+width = 640
+height = 480
+framerate = 12
+quality = 70
+stream_timeout_s = 0
+```
+
+Before calibration, still snapshots, or RAW stack capture, the host API stops the preview stream so `rpicam-still` can acquire the camera.
 
 Label records are for local dataset governance only. They track consent, allowed use, exclusion from model training, quality notes, lens/lighting metadata, and subject codes. Iriscope does not perform identity matching or biometric enrollment.

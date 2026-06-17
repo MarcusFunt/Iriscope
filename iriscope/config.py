@@ -48,6 +48,15 @@ class CaptureSettings:
 
 
 @dataclass(frozen=True)
+class PreviewSettings:
+    width: int = 640
+    height: int = 480
+    framerate: int = 12
+    quality: int = 70
+    stream_timeout_s: int = 0
+
+
+@dataclass(frozen=True)
 class ProcessingSettings:
     stack_method: str = "sigma"
     sigma: float = 2.5
@@ -60,6 +69,7 @@ class ProcessingSettings:
 class ProjectConfig:
     pi: PiConfig = PiConfig()
     capture: CaptureSettings = CaptureSettings()
+    preview: PreviewSettings = PreviewSettings()
     processing: ProcessingSettings = ProcessingSettings()
 
 
@@ -74,6 +84,7 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
     return ProjectConfig(
         pi=_parse_pi(data.get("pi", {})),
         capture=_parse_capture(data.get("capture", {})),
+        preview=_parse_preview(data.get("preview", {})),
         processing=_parse_processing(data.get("processing", {})),
     )
 
@@ -132,6 +143,16 @@ def _parse_capture(data: dict[str, Any]) -> CaptureSettings:
         nopreview=bool(data.get("nopreview", True)),
         immediate=bool(data.get("immediate", True)),
         raw=bool(data.get("raw", True)),
+    )
+
+
+def _parse_preview(data: dict[str, Any]) -> PreviewSettings:
+    return PreviewSettings(
+        width=int(data.get("width", 640)),
+        height=int(data.get("height", 480)),
+        framerate=int(data.get("framerate", 12)),
+        quality=int(data.get("quality", 70)),
+        stream_timeout_s=int(data.get("stream_timeout_s", 0)),
     )
 
 

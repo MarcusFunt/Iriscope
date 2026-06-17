@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from .config import CaptureSettings, PiConfig
+from .config import CaptureSettings, PiConfig, PreviewSettings
 
 
 VALID_EYES = {"left", "right"}
@@ -62,6 +62,40 @@ def build_rpicam_command(
     if metadata_file:
         args += ["--metadata", metadata_file, "--metadata-format", "json"]
     args += ["-o", output_file]
+    return args
+
+
+def build_rpicam_mjpeg_command(
+    settings: CaptureSettings,
+    preview: PreviewSettings,
+    output_file: str = "-",
+) -> list[str]:
+    args = [
+        "rpicam-vid",
+        "-t",
+        str(max(0, preview.stream_timeout_s * 1000)),
+        "-n",
+        "--codec",
+        "mjpeg",
+        "--width",
+        str(preview.width),
+        "--height",
+        str(preview.height),
+        "--framerate",
+        str(preview.framerate),
+        "--quality",
+        str(preview.quality),
+        "--shutter",
+        str(settings.shutter_us),
+        "--gain",
+        _format_float(settings.gain),
+        "--awbgains",
+        f"{_format_float(settings.awb_gains[0])},{_format_float(settings.awb_gains[1])}",
+        "--denoise",
+        settings.denoise,
+        "-o",
+        output_file,
+    ]
     return args
 
 

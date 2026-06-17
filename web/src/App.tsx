@@ -28,6 +28,8 @@ import {
   getLabel,
   getSessions,
   getStatus,
+  piSnapshotUrl,
+  piStreamUrl,
   preprocessSession,
   processSession,
   reviewUrl,
@@ -56,6 +58,8 @@ type ProcessedOutputState = {
   sessionDir: string;
   result: ProcessResponse;
 };
+
+type PreviewMode = "stream" | "snapshot";
 
 const defaultCapture: CaptureForm = {
   subject: "S001",
@@ -98,6 +102,7 @@ export default function App() {
   ]);
   const [busy, setBusy] = useState<string | null>(null);
   const [snapshotNonce, setSnapshotNonce] = useState(Date.now());
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("stream");
   const [snapshotFailed, setSnapshotFailed] = useState(false);
 
   const appendLog = useCallback((level: LogItem["level"], message: string) => {
@@ -158,6 +163,16 @@ export default function App() {
   }, [status]);
 
   const piReady = Boolean(status?.config.pi_host);
+  const previewLabel = piReady ? "Pi HQ camera" : cameraName;
+  const previewSourceKey = piReady ? `pi:${status?.config.pi_host ?? ""}` : `uvc:${cameraName}`;
+  const previewSrc = snapshotFailed
+    || !status
+    ? "/iris-placeholder.png"
+    : piReady
+      ? previewMode === "stream"
+        ? piStreamUrl(snapshotNonce)
+        : piSnapshotUrl(snapshotNonce)
+      : snapshotUrl(cameraName, snapshotNonce);
   const serialPort = status?.serial_ports.find((port) => port === "COM22") ?? status?.serial_ports[0] ?? "not detected";
   const selectedRecord = useMemo(
     () => sessions.find((session) => session.path === selectedSession),
@@ -176,6 +191,12 @@ export default function App() {
       contact_sheet: processedOutput.result.contact_sheet,
     };
   }, [processedOutput, selectedRecord, selectedSession]);
+
+  useEffect(() => {
+    setSnapshotFailed(false);
+    setPreviewMode("stream");
+    setSnapshotNonce(Date.now());
+  }, [previewSourceKey]);
 
   async function runAction<T>(name: string, action: () => Promise<T>, onSuccess?: (result: T) => void) {
     setBusy(name);
@@ -200,24 +221,38 @@ export default function App() {
 
         <section className="work-grid" aria-label="Iriscope workstation">
           <div className="preview-panel">
-            <PanelTitle icon={<ScanEye size={18} />} title="Live Preview" actionLabel={cameraName} />
+            <PanelTitle icon={<ScanEye size={18} />} title="Live Preview" actionLabel={previewLabel} />
             <div className="preview-frame">
               <img
-                src={snapshotFailed ? "/iris-placeholder.png" : snapshotUrl(cameraName, snapshotNonce)}
+                src={previewSrc}
                 alt="Live camera preview"
-                onError={() => setSnapshotFailed(true)}
+                onError={() => {
+                  if (piReady && previewMode === "stream") {
+                    setPreviewMode("snapshot");
+                    setSnapshotFailed(false);
+                    setSnapshotNonce(Date.now());
+                    appendLog("warn", "Pi stream unavailable; using still preview fallback.");
+                    return;
+                  }
+                  setSnapshotFailed(true);
+                }}
               />
               <button
                 className="icon-button preview-refresh"
                 title="Refresh preview"
                 onClick={() => {
                   setSnapshotFailed(false);
+                  setPreviewMode("stream");
                   setSnapshotNonce(Date.now());
                 }}
               >
                 <RefreshCw size={17} />
               </button>
             </div>
+            {previewMode === "snapshot" && !snapshotFailed ? (
+              <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
+            ) : null}
+            {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
             <QualityStrip preprocess={preprocess} />
           </div>
 
@@ -229,6 +264,9 @@ export default function App() {
             onCalibrate={() =>
               runAction("Calibration", () => apiPost("/api/calibrate"), (result) => {
                 appendLog("info", JSON.stringify(result));
+                setPreviewMode("stream");
+                setSnapshotFailed(false);
+                setSnapshotNonce(Date.now());
               })
             }
             onCapture={() =>
@@ -238,6 +276,11 @@ export default function App() {
                   awb_red: capture.awb_red,
                   awb_blue: capture.awb_blue,
                 }),
+                () => {
+                  setPreviewMode("stream");
+                  setSnapshotFailed(false);
+                  setSnapshotNonce(Date.now());
+                },
               )
             }
           />

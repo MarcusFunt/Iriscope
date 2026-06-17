@@ -59,6 +59,16 @@ export function snapshotUrl(deviceName: string, nonce: number) {
   return `/api/uvc/snapshot?${params.toString()}`;
 }
 
+export function piSnapshotUrl(nonce: number) {
+  const params = new URLSearchParams({ t: String(nonce) });
+  return `/api/pi/snapshot?${params.toString()}`;
+}
+
+export function piStreamUrl(nonce: number) {
+  const params = new URLSearchParams({ t: String(nonce) });
+  return `/api/pi/stream.mjpeg?${params.toString()}`;
+}
+
 export function artifactUrl(path: string) {
   const params = new URLSearchParams({ path });
   return `/api/artifact?${params.toString()}`;

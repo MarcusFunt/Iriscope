@@ -19,6 +19,8 @@ def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypa
     assert payload["config"]["pi_host"] == "iriscope-pi.local"
     assert payload["config"]["capture"]["count"] == 16
     assert payload["config"]["capture"]["awb_gains"] == [2.0, 1.2]
+    assert payload["config"]["preview"]["width"] == 640
+    assert "rpicam-vid" in payload["config"]["preview"]["command_preview"]
     assert payload["capture_root"] == str(tmp_path / "captures")
 
 
@@ -49,6 +51,34 @@ def test_sessions_expose_outputs_and_artifact_endpoints_are_bounded(tmp_path: Pa
     _write_image(outside)
     rejected_response = client.get("/api/artifact", params={"path": str(outside)})
     assert rejected_response.status_code == 404
+
+
+def test_pi_snapshot_endpoint_returns_remote_preview_file(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    snapshot = tmp_path / "snapshot.jpg"
+    _write_image(snapshot)
+    monkeypatch.setattr(web_api, "_capture_pi_snapshot", lambda config: snapshot)
+
+    response = client.get("/api/pi/snapshot")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.content
+
+
+def test_pi_stream_endpoint_returns_mjpeg_stream(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+
+    def fake_stream(config):
+        yield b"--iriscope-frame\r\nContent-Type: image/jpeg\r\n\r\nframe\r\n"
+
+    monkeypatch.setattr(web_api, "_open_pi_mjpeg_stream", fake_stream)
+
+    response = client.get("/api/pi/stream.mjpeg")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
+    assert b"--iriscope-frame" in response.content
 
 
 def test_label_contract_loads_defaults_and_persists_updates(tmp_path: Path, monkeypatch):

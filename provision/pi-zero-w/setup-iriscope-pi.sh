@@ -18,11 +18,40 @@ fi
 TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
 CAPTURE_ROOT="${TARGET_HOME}/iriscope"
 BOOT_CONFIG=""
+BOOT_CMDLINE=""
+ENABLE_USB_ETHERNET=0
+USB_IP="10.42.0.2"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable-usb-ethernet)
+      ENABLE_USB_ETHERNET=1
+      shift
+      ;;
+    --usb-ip)
+      USB_IP="${2:-}"
+      if [[ -z "${USB_IP}" ]]; then
+        echo "--usb-ip requires an address." >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if [[ -f /boot/firmware/config.txt ]]; then
   BOOT_CONFIG="/boot/firmware/config.txt"
 elif [[ -f /boot/config.txt ]]; then
   BOOT_CONFIG="/boot/config.txt"
+fi
+if [[ -f /boot/firmware/cmdline.txt ]]; then
+  BOOT_CMDLINE="/boot/firmware/cmdline.txt"
+elif [[ -f /boot/cmdline.txt ]]; then
+  BOOT_CMDLINE="/boot/cmdline.txt"
 fi
 
 echo "Updating package lists..."
@@ -65,6 +94,48 @@ if [[ -n "${BOOT_CONFIG}" ]]; then
   fi
 else
   echo "Warning: could not find boot config; skipping camera_auto_detect setting." >&2
+fi
+
+if [[ "${ENABLE_USB_ETHERNET}" -eq 1 ]]; then
+  if [[ -z "${BOOT_CONFIG}" || -z "${BOOT_CMDLINE}" ]]; then
+    echo "Could not find boot config/cmdline files for USB Ethernet gadget setup." >&2
+    exit 1
+  fi
+
+  echo "Enabling Pi Zero USB Ethernet gadget mode..."
+  if ! grep -qE '^[[:space:]]*dtoverlay=dwc2' "${BOOT_CONFIG}"; then
+    printf '\n# Iriscope USB Ethernet gadget\ndtoverlay=dwc2,dr_mode=peripheral\n' >> "${BOOT_CONFIG}"
+  fi
+
+  cmdline="$(<"${BOOT_CMDLINE}")"
+  if [[ "${cmdline}" != *"g_ether"* ]]; then
+    if [[ "${cmdline}" == *"rootwait"* ]]; then
+      cmdline="${cmdline/rootwait/rootwait modules-load=dwc2,g_ether}"
+    else
+      cmdline="${cmdline} modules-load=dwc2,g_ether"
+    fi
+    printf '%s\n' "${cmdline}" > "${BOOT_CMDLINE}"
+  fi
+
+  if command -v nmcli >/dev/null 2>&1; then
+    echo "Configuring static USB gadget address ${USB_IP}/24 on usb0..."
+    if nmcli -t -f NAME connection show | grep -qx 'iriscope-usb0'; then
+      nmcli connection modify iriscope-usb0 \
+        connection.interface-name usb0 \
+        ipv4.method manual \
+        ipv4.addresses "${USB_IP}/24" \
+        ipv4.never-default yes \
+        ipv6.method disabled
+    else
+      nmcli connection add type ethernet ifname usb0 con-name iriscope-usb0 \
+        ipv4.method manual \
+        ipv4.addresses "${USB_IP}/24" \
+        ipv4.never-default yes \
+        ipv6.method disabled
+    fi
+  else
+    echo "Warning: nmcli not found; configure usb0=${USB_IP}/24 manually after reboot." >&2
+  fi
 fi
 
 echo "Installing iriscope-camera-smoke-test..."

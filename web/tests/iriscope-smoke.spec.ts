@@ -17,6 +17,7 @@ const pngPixel = Buffer.from(
 test("main workstation flow loads config, labels, preprocesses, processes, and saves", async ({ page }) => {
   let processed = false;
   let savedLabel: Record<string, unknown> | null = null;
+  let piStreamRequested = false;
 
   await page.route("**/api/status", async (route) => {
     await route.fulfill({
@@ -36,6 +37,15 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
             denoise: "off",
             quality: 95,
             command_preview: "rpicam-still --raw -o frame_0001.jpg",
+          },
+          preview: {
+            width: 640,
+            height: 480,
+            framerate: 12,
+            quality: 70,
+            stream_timeout_s: 0,
+            command_preview: "rpicam-vid -t 0 -n --codec mjpeg -o -",
+            media_type: "multipart/x-mixed-replace; boundary=iriscope-frame",
           },
           processing: { stack_method: "sigma", sigma: 2.5, min_frames: 3 },
         },
@@ -125,8 +135,15 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
     await route.fulfill({ json: { ok: true, output_dir: `${sessionDir}/processed`, ...outputPaths } });
   });
 
-  await page.route("**/api/uvc/snapshot**", async (route) => {
+  await page.route("**/api/pi/stream.mjpeg**", async (route) => {
+    piStreamRequested = true;
     await route.fulfill({ contentType: "image/png", body: pngPixel });
+  });
+  await page.route("**/api/pi/snapshot**", async (route) => {
+    await route.fulfill({ contentType: "image/png", body: pngPixel });
+  });
+  await page.route("**/api/uvc/snapshot**", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: "UVC preview should not be used when Pi is configured." } });
   });
   await page.route("**/api/artifact**", async (route) => {
     await route.fulfill({ contentType: "image/png", body: pngPixel });
@@ -135,6 +152,8 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Capture workstation" })).toBeVisible();
+  await expect(page.getByText("Pi HQ camera")).toBeVisible();
+  await expect.poll(() => piStreamRequested).toBe(true);
   await expect(page.getByLabel("Frames")).toHaveValue("16");
   await expect(page.getByLabel("Shutter us")).toHaveValue("6000");
   await expect(page.getByLabel("Gain")).toHaveValue("1.5");

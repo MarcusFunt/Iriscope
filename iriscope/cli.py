@@ -41,6 +41,13 @@ denoise = "off"
 quality = 95
 nopreview = true
 
+[preview]
+width = 640
+height = 480
+framerate = 12
+quality = 70
+stream_timeout_s = 0
+
 [processing]
 stack_method = "sigma"
 sigma = 2.5

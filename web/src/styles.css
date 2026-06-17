@@ -247,6 +247,12 @@ nav {
   display: block;
 }
 
+.preview-message {
+  margin: 10px 0 0;
+  color: #f2c77d;
+  font-size: 12px;
+}
+
 .preview-refresh {
   position: absolute;
   top: 10px;
