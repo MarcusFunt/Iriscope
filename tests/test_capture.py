@@ -9,6 +9,7 @@ def test_build_rpicam_command_matches_capture_contract():
         count=12,
         shutter_us=8000,
         gain=1,
+        awb="manual",
         awb_gains=(1.8, 1.4),
         denoise="off",
         quality=95,
@@ -24,6 +25,31 @@ def test_build_rpicam_command_matches_capture_contract():
     assert command[command.index("--denoise") + 1] == "off"
     assert command[command.index("--metadata") + 1] == "frame_0001.json"
     assert command[-2:] == ["-o", "frame_0001.jpg"]
+
+
+def test_auto_exposure_and_awb_are_not_forced():
+    command = build_rpicam_command("frame_0001.jpg", CaptureSettings(shutter_us=0, gain=0, awb="auto"))
+
+    assert "--shutter" not in command
+    assert "--gain" not in command
+    assert "--awbgains" not in command
+    assert command[command.index("--awb") + 1] == "auto"
+
+
+def test_camera_tuning_and_colour_controls_are_passed_to_rpicam():
+    settings = CaptureSettings(
+        tuning_file="/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json",
+        metering="spot",
+        ev=0.7,
+        saturation=0.8,
+    )
+
+    command = build_rpicam_command("frame_0001.jpg", settings)
+
+    assert command[command.index("--tuning-file") + 1].endswith("imx477_scientific.json")
+    assert command[command.index("--metering") + 1] == "spot"
+    assert command[command.index("--ev") + 1] == "0.7"
+    assert command[command.index("--saturation") + 1] == "0.8"
 
 
 def test_session_name_is_stable_and_safe():

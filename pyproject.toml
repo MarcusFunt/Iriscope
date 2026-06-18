@@ -30,7 +30,11 @@ web = [
   "pyserial>=3.5",
   "uvicorn[standard]>=0.30",
 ]
+webrtc = [
+  "aiortc>=1.10",
+]
 dev = [
+  "aiortc>=1.10",
   "fastapi>=0.115",
   "httpx>=0.27",
   "pyserial>=3.5",

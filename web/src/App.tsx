@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Activity,
@@ -25,6 +25,7 @@ import {
 import {
   apiPost,
   artifactUrl,
+  createPiWebRTCAnswer,
   getLabel,
   getSessions,
   getStatus,
@@ -34,9 +35,23 @@ import {
   processSession,
   reviewUrl,
   saveLabel,
+  saveConfig,
   snapshotUrl,
 } from "./api";
-import type { LabelRecord, PreprocessReport, ProcessResponse, SessionRecord, StatusResponse } from "./types";
+import type {
+  AwbMode,
+  ConfigPayload,
+  ExposureMode,
+  HdrMode,
+  HealthCheck,
+  LabelRecord,
+  MeteringMode,
+  PreprocessReport,
+  ProcessOptions,
+  ProcessResponse,
+  SessionRecord,
+  StatusResponse,
+} from "./types";
 
 type CaptureForm = {
   subject: string;
@@ -44,6 +59,7 @@ type CaptureForm = {
   count: number;
   shutter_us: number;
   gain: number;
+  awb: AwbMode;
   awb_red: number;
   awb_blue: number;
 };
@@ -59,17 +75,57 @@ type ProcessedOutputState = {
   result: ProcessResponse;
 };
 
-type PreviewMode = "stream" | "snapshot";
+type PreviewMode = "webrtc" | "stream" | "snapshot";
+type ActiveView = "capture" | "preprocess" | "label" | "review" | "settings";
 
 const defaultCapture: CaptureForm = {
   subject: "S001",
   eye: "left",
   count: 12,
-  shutter_us: 8000,
-  gain: 1,
-  awb_red: 1.8,
+  shutter_us: 0,
+  gain: 0,
+  awb: "auto",
+  awb_red: 3.2,
   awb_blue: 1.4,
 };
+
+const awbModes: Array<{ value: AwbMode; label: string }> = [
+  { value: "auto", label: "Auto" },
+  { value: "manual", label: "Manual gains" },
+  { value: "daylight", label: "Daylight" },
+  { value: "cloudy", label: "Cloudy" },
+  { value: "indoor", label: "Indoor" },
+  { value: "tungsten", label: "Tungsten" },
+  { value: "fluorescent", label: "Fluorescent" },
+  { value: "incandescent", label: "Incandescent" },
+  { value: "custom", label: "Custom" },
+];
+
+const meteringModes: Array<{ value: MeteringMode; label: string }> = [
+  { value: "centre", label: "Centre" },
+  { value: "spot", label: "Spot" },
+  { value: "average", label: "Average" },
+  { value: "custom", label: "Custom" },
+];
+
+const exposureModes: Array<{ value: ExposureMode; label: string }> = [
+  { value: "normal", label: "Normal" },
+  { value: "sport", label: "Sport" },
+];
+
+const hdrModes: Array<{ value: HdrMode; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "auto", label: "Auto" },
+  { value: "sensor", label: "Sensor" },
+  { value: "single-exp", label: "Single exposure" },
+];
+
+const tuningFileOptions = [
+  { value: "", label: "Default tuning" },
+  { value: "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json", label: "IMX477 scientific" },
+  { value: "/usr/share/libcamera/ipa/rpi/vc4/imx477_noir.json", label: "IMX477 NoIR" },
+  { value: "/usr/share/libcamera/ipa/rpi/vc4/imx477.json", label: "IMX477 standard vc4" },
+];
 
 const defaultLabel: LabelRecord = {
   subject_code: "",
@@ -88,13 +144,27 @@ const defaultLabel: LabelRecord = {
   updated_at: null,
 };
 
+const defaultProcessOptions: ProcessOptions = {
+  stack_method: "sigma",
+  sigma: 2.5,
+  min_frames: 3,
+  max_working_edge: null,
+  dark_path: "",
+  flat_path: "",
+};
+
 export default function App() {
+  const [activeView, setActiveView] = useState<ActiveView>("capture");
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedSession, setSelectedSession] = useState("");
   const [capture, setCapture] = useState<CaptureForm>(defaultCapture);
   const [captureHydrated, setCaptureHydrated] = useState(false);
+  const [processHydrated, setProcessHydrated] = useState(false);
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [label, setLabel] = useState<LabelRecord>(defaultLabel);
+  const [settingsDraft, setSettingsDraft] = useState<ConfigPayload | null>(null);
+  const [processOptions, setProcessOptions] = useState<ProcessOptions>(defaultProcessOptions);
   const [preprocess, setPreprocess] = useState<PreprocessReport | null>(null);
   const [processedOutput, setProcessedOutput] = useState<ProcessedOutputState | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([
@@ -102,8 +172,9 @@ export default function App() {
   ]);
   const [busy, setBusy] = useState<string | null>(null);
   const [snapshotNonce, setSnapshotNonce] = useState(Date.now());
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("stream");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("webrtc");
   const [snapshotFailed, setSnapshotFailed] = useState(false);
+  const [livePreviewReady, setLivePreviewReady] = useState(false);
 
   const appendLog = useCallback((level: LogItem["level"], message: string) => {
     setLogs((items) => [{ time: now(), level, message }, ...items].slice(0, 80));
@@ -118,13 +189,21 @@ export default function App() {
         setCapture(captureFromStatus(nextStatus));
         setCaptureHydrated(true);
       }
+      if (!processHydrated) {
+        setProcessOptions(processFromStatus(nextStatus));
+        setProcessHydrated(true);
+      }
+      if (!settingsHydrated) {
+        setSettingsDraft(configFromStatus(nextStatus));
+        setSettingsHydrated(true);
+      }
       if (!selectedSession && nextSessions[0]) {
         setSelectedSession(nextSessions[0].path);
       }
     } catch (error) {
       appendLog("error", errorMessage(error));
     }
-  }, [appendLog, captureHydrated, selectedSession]);
+  }, [appendLog, captureHydrated, processHydrated, selectedSession, settingsHydrated]);
 
   useEffect(() => {
     void refresh();
@@ -154,26 +233,34 @@ export default function App() {
     };
   }, [appendLog, selectedSession, sessions]);
 
-  const cameraName = useMemo(() => {
-    const devices = status?.camera_devices ?? [];
-    const piDevice =
-      devices.find((device) => device.instance_id?.toLowerCase().includes("vid_1d6b&pid_0104")) ??
-      devices.find((device) => device.name === "UVC Camera");
-    return piDevice?.name ?? devices[0]?.name ?? "UVC Camera";
-  }, [status]);
+  const displayStatus = useMemo(() => (livePreviewReady ? withLivePreviewOk(status) : status), [livePreviewReady, status]);
 
-  const piReady = Boolean(status?.config.pi_host);
-  const previewLabel = piReady ? "Pi HQ camera" : cameraName;
-  const previewSourceKey = piReady ? `pi:${status?.config.pi_host ?? ""}` : `uvc:${cameraName}`;
+  const cameraName = useMemo(() => {
+    const devices = displayStatus?.camera_devices ?? [];
+    const readyDevices = devices.filter((device) => (device.status ?? "").toLowerCase() === "ok");
+    const piDevice =
+      readyDevices.find((device) => device.instance_id?.toLowerCase().includes("vid_1d6b&pid_0104")) ??
+      readyDevices.find((device) => device.name === "UVC Camera") ??
+      readyDevices[0] ??
+      devices[0];
+    return piDevice?.name ?? "no camera";
+  }, [displayStatus]);
+
+  const piConfigured = Boolean(displayStatus?.config.pi_host);
+  const piReady = Boolean(displayStatus?.health?.ssh?.ok && displayStatus?.health?.rpicam?.ok);
+  const previewLabel = piConfigured ? "Pi HQ camera" : cameraName;
+  const previewSourceKey = piConfigured ? `pi:${displayStatus?.config.pi_host ?? ""}` : `uvc:${cameraName}`;
   const previewSrc = snapshotFailed
-    || !status
+    || !displayStatus
     ? "/iris-placeholder.png"
-    : piReady
-      ? previewMode === "stream"
+    : piConfigured
+      ? previewMode === "snapshot"
+        ? piSnapshotUrl(snapshotNonce)
+        : previewMode === "stream"
         ? piStreamUrl(snapshotNonce)
-        : piSnapshotUrl(snapshotNonce)
+        : "/iris-placeholder.png"
       : snapshotUrl(cameraName, snapshotNonce);
-  const serialPort = status?.serial_ports.find((port) => port === "COM22") ?? status?.serial_ports[0] ?? "not detected";
+  const serialPort = displayStatus?.serial_ports[0] ?? "not detected";
   const selectedRecord = useMemo(
     () => sessions.find((session) => session.path === selectedSession),
     [selectedSession, sessions],
@@ -191,12 +278,53 @@ export default function App() {
       contact_sheet: processedOutput.result.contact_sheet,
     };
   }, [processedOutput, selectedRecord, selectedSession]);
+  const currentProcessResult = processedOutput?.sessionDir === selectedSession ? processedOutput.result : null;
 
   useEffect(() => {
+    setLivePreviewReady(false);
     setSnapshotFailed(false);
-    setPreviewMode("stream");
+    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
     setSnapshotNonce(Date.now());
-  }, [previewSourceKey]);
+  }, [piConfigured, previewSourceKey]);
+
+  const handleStreamFallback = useCallback(() => {
+    setLivePreviewReady(false);
+    setPreviewMode("snapshot");
+    setSnapshotFailed(false);
+    setSnapshotNonce(Date.now());
+    appendLog("warn", "Pi stream unavailable; using still preview fallback.");
+  }, [appendLog]);
+
+  const handleWebRTCFallback = useCallback(
+    (message: string) => {
+      setLivePreviewReady(false);
+      setPreviewMode("stream");
+      setSnapshotFailed(false);
+      setSnapshotNonce(Date.now());
+      appendLog("warn", `WebRTC preview unavailable; using MJPEG fallback. ${message}`);
+    },
+    [appendLog],
+  );
+
+  const handlePreviewFailed = useCallback(() => {
+    setLivePreviewReady(false);
+    setSnapshotFailed(true);
+  }, []);
+
+  const handlePreviewReady = useCallback(() => {
+    setLivePreviewReady(true);
+    setStatus((current) =>
+      current
+        ? withLivePreviewOk(current)
+        : current,
+    );
+  }, []);
+
+  const handleRefreshPreview = useCallback(() => {
+    setSnapshotFailed(false);
+    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+    setSnapshotNonce(Date.now());
+  }, [piConfigured]);
 
   async function runAction<T>(name: string, action: () => Promise<T>, onSuccess?: (result: T) => void) {
     setBusy(name);
@@ -215,127 +343,164 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar activeView={activeView} onChange={setActiveView} />
       <main className="workspace">
-      <TopBar status={status} piReady={piReady} serialPort={serialPort} cameraName={cameraName} onRefresh={refresh} />
+        <TopBar status={displayStatus} serialPort={serialPort} cameraName={cameraName} onRefresh={refresh} />
 
-        <section className="work-grid" aria-label="Iriscope workstation">
-          <div className="preview-panel">
-            <PanelTitle icon={<ScanEye size={18} />} title="Live Preview" actionLabel={previewLabel} />
-            <div className="preview-frame">
-              <img
-                src={previewSrc}
-                alt="Live camera preview"
-                onError={() => {
-                  if (piReady && previewMode === "stream") {
-                    setPreviewMode("snapshot");
+        <section className={`work-grid ${activeView}`} aria-label="Iriscope workstation">
+          {activeView === "capture" ? (
+            <>
+              <PreviewPanel
+                previewLabel={previewLabel}
+                previewSrc={previewSrc}
+                preprocess={preprocess}
+                previewMode={previewMode}
+                snapshotFailed={snapshotFailed}
+                piConfigured={piConfigured}
+                nonce={snapshotNonce}
+                onStreamFallback={handleStreamFallback}
+                onWebRTCFallback={handleWebRTCFallback}
+                onPreviewFailed={handlePreviewFailed}
+                onPreviewReady={handlePreviewReady}
+                onRefreshPreview={handleRefreshPreview}
+              />
+              <CapturePanel
+                capture={capture}
+                setCapture={setCapture}
+                busy={busy}
+                piReady={piReady}
+                onCalibrate={() =>
+                  runAction("Calibration", () => apiPost("/api/calibrate"), (result) => {
+                    appendLog("info", JSON.stringify(result));
+                    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
                     setSnapshotFailed(false);
                     setSnapshotNonce(Date.now());
-                    appendLog("warn", "Pi stream unavailable; using still preview fallback.");
-                    return;
-                  }
-                  setSnapshotFailed(true);
-                }}
+                  })
+                }
+                onCapture={() =>
+                  runAction(
+                    "Capture",
+                    () =>
+                      apiPost("/api/capture", {
+                        ...capture,
+                        awb_red: capture.awb === "manual" ? capture.awb_red : null,
+                        awb_blue: capture.awb === "manual" ? capture.awb_blue : null,
+                      }),
+                    () => {
+                      setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+                      setSnapshotFailed(false);
+                      setSnapshotNonce(Date.now());
+                    },
+                  )
+                }
               />
-              <button
-                className="icon-button preview-refresh"
-                title="Refresh preview"
-                onClick={() => {
-                  setSnapshotFailed(false);
-                  setPreviewMode("stream");
-                  setSnapshotNonce(Date.now());
-                }}
-              >
-                <RefreshCw size={17} />
-              </button>
-            </div>
-            {previewMode === "snapshot" && !snapshotFailed ? (
-              <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
-            ) : null}
-            {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
-            <QualityStrip preprocess={preprocess} />
-          </div>
+              <SessionRail sessions={sessions} selectedSession={selectedSession} onSelect={(session) => setSelectedSession(session.path)} />
+              <LogPanel logs={logs} />
+            </>
+          ) : null}
 
-          <CapturePanel
-            capture={capture}
-            setCapture={setCapture}
-            busy={busy}
-            piReady={piReady}
-            onCalibrate={() =>
-              runAction("Calibration", () => apiPost("/api/calibrate"), (result) => {
-                appendLog("info", JSON.stringify(result));
-                setPreviewMode("stream");
-                setSnapshotFailed(false);
-                setSnapshotNonce(Date.now());
-              })
-            }
-            onCapture={() =>
-              runAction("Capture", () =>
-                apiPost("/api/capture", {
-                  ...capture,
-                  awb_red: capture.awb_red,
-                  awb_blue: capture.awb_blue,
-                }),
-                () => {
-                  setPreviewMode("stream");
-                  setSnapshotFailed(false);
-                  setSnapshotNonce(Date.now());
-                },
-              )
-            }
-          />
+          {activeView === "preprocess" ? (
+            <>
+              <PreprocessPanel
+                sessionDir={selectedSession}
+                setSessionDir={setSelectedSession}
+                report={preprocess}
+                processOptions={processOptions}
+                setProcessOptions={setProcessOptions}
+                busy={busy}
+                onPreprocess={() =>
+                  runAction("Preprocess", () => preprocessSession(selectedSession), (result) => {
+                    setPreprocess(result.report);
+                  })
+                }
+                onProcess={() =>
+                  runAction("Process", () => processSession(selectedSession, processOptions), (result) => {
+                    setProcessedOutput({ sessionDir: selectedSession, result });
+                  })
+                }
+              />
+              <OutputPanel
+                sessionDir={selectedSession}
+                outputs={outputPaths}
+                processed={Boolean(selectedRecord?.processed || processedOutput?.sessionDir === selectedSession)}
+                result={currentProcessResult}
+              />
+              <SessionRail sessions={sessions} selectedSession={selectedSession} onSelect={(session) => setSelectedSession(session.path)} />
+              <LogPanel logs={logs} />
+            </>
+          ) : null}
 
-          <SessionRail
-            sessions={sessions}
-            selectedSession={selectedSession}
-            onSelect={(session) => {
-              setSelectedSession(session.path);
-            }}
-          />
+          {activeView === "label" ? (
+            <>
+              <LabelPanel
+                label={label}
+                setLabel={setLabel}
+                sessionDir={selectedSession}
+                busy={busy}
+                onSave={() =>
+                  runAction("Save Label", () => saveLabel(selectedSession, label), (result) => {
+                    setLabel(result.label);
+                  })
+                }
+              />
+              <SessionRail sessions={sessions} selectedSession={selectedSession} onSelect={(session) => setSelectedSession(session.path)} />
+              <LogPanel logs={logs} />
+            </>
+          ) : null}
 
-          <PreprocessPanel
-            sessionDir={selectedSession}
-            setSessionDir={setSelectedSession}
-            report={preprocess}
-            busy={busy}
-            onPreprocess={() =>
-              runAction("Preprocess", () => preprocessSession(selectedSession), (result) => {
-                setPreprocess(result.report);
-              })
-            }
-            onProcess={() =>
-              runAction("Process", () => processSession(selectedSession), (result) => {
-                setProcessedOutput({ sessionDir: selectedSession, result });
-              })
-            }
-          />
+          {activeView === "review" ? (
+            <>
+              <OutputPanel
+                sessionDir={selectedSession}
+                outputs={outputPaths}
+                processed={Boolean(selectedRecord?.processed || processedOutput?.sessionDir === selectedSession)}
+                result={currentProcessResult}
+              />
+              <SessionRail sessions={sessions} selectedSession={selectedSession} onSelect={(session) => setSelectedSession(session.path)} />
+              <LogPanel logs={logs} />
+            </>
+          ) : null}
 
-          <OutputPanel
-            sessionDir={selectedSession}
-            outputs={outputPaths}
-            processed={Boolean(selectedRecord?.processed || processedOutput?.sessionDir === selectedSession)}
-          />
-
-          <LabelPanel
-            label={label}
-            setLabel={setLabel}
-            sessionDir={selectedSession}
-            busy={busy}
-            onSave={() =>
-              runAction("Save Label", () => saveLabel(selectedSession, label), (result) => {
-                setLabel(result.label);
-              })
-            }
-          />
-
-          <LogPanel logs={logs} />
+          {activeView === "settings" ? (
+            <>
+              <SettingsPanel
+                settings={settingsDraft}
+                setSettings={setSettingsDraft}
+                busy={busy}
+                onSave={() =>
+                  settingsDraft
+                    ? runAction("Save Settings", () => saveConfig(settingsDraft), () => {
+                        setCaptureHydrated(false);
+                        setProcessHydrated(false);
+                        setSettingsHydrated(false);
+                      })
+                    : undefined
+                }
+              />
+              <HealthPanel status={displayStatus} />
+              <LogPanel logs={logs} />
+            </>
+          ) : null}
         </section>
       </main>
     </div>
   );
 }
 
-function Sidebar() {
+function Sidebar({
+  activeView,
+  onChange,
+}: {
+  activeView: ActiveView;
+  onChange: (view: ActiveView) => void;
+}) {
+  const items: Array<{ view: ActiveView; icon: ReactNode; label: string }> = [
+    { view: "capture", icon: <Eye size={18} />, label: "Capture" },
+    { view: "preprocess", icon: <SlidersHorizontal size={18} />, label: "Preprocess" },
+    { view: "label", icon: <Tag size={18} />, label: "Label" },
+    { view: "review", icon: <Sparkles size={18} />, label: "Review" },
+    { view: "settings", icon: <Settings size={18} />, label: "Settings" },
+  ];
   return (
     <aside className="sidebar" aria-label="Primary navigation">
       <div className="brand">
@@ -348,11 +513,15 @@ function Sidebar() {
         </div>
       </div>
       <nav>
-        <NavItem icon={<Eye size={18} />} label="Capture" active />
-        <NavItem icon={<SlidersHorizontal size={18} />} label="Preprocess" />
-        <NavItem icon={<Tag size={18} />} label="Label" />
-        <NavItem icon={<Sparkles size={18} />} label="Review" />
-        <NavItem icon={<Settings size={18} />} label="Settings" />
+        {items.map((item) => (
+          <NavItem
+            key={item.view}
+            icon={item.icon}
+            label={item.label}
+            active={activeView === item.view}
+            onClick={() => onChange(item.view)}
+          />
+        ))}
       </nav>
       <div className="privacy-note">
         <Database size={16} />
@@ -362,9 +531,19 @@ function Sidebar() {
   );
 }
 
-function NavItem({ icon, label, active = false }: { icon: ReactNode; label: string; active?: boolean }) {
+function NavItem({
+  icon,
+  label,
+  active = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
   return (
-    <button className={active ? "nav-item active" : "nav-item"} type="button">
+    <button className={active ? "nav-item active" : "nav-item"} type="button" onClick={onClick}>
       {icon}
       <span>{label}</span>
     </button>
@@ -373,13 +552,11 @@ function NavItem({ icon, label, active = false }: { icon: ReactNode; label: stri
 
 function TopBar({
   status,
-  piReady,
   serialPort,
   cameraName,
   onRefresh,
 }: {
   status: StatusResponse | null;
-  piReady: boolean;
   serialPort: string;
   cameraName: string;
   onRefresh: () => void;
@@ -393,10 +570,13 @@ function TopBar({
         <p>{status?.capture_root ?? "captures"} </p>
       </div>
       <div className="status-strip">
-        <StatusPill tone={serialPort === "COM22" ? "ok" : "warn"} icon={<Terminal size={16} />} label={serialPort} />
-        <StatusPill tone={cameraName === "UVC Camera" ? "ok" : "warn"} icon={<ScanEye size={16} />} label={cameraName} />
-        <StatusPill tone={piReady ? "ok" : "warn"} icon={<HardDrive size={16} />} label={piReady ? status?.config.pi_host ?? "Pi" : "No SSH host"} />
-        <StatusPill tone={piReady ? "ok" : "warn"} icon={<CircleAlert size={16} />} label={piReady ? "Pi OS ready" : "Pi OS pending"} />
+        <StatusPill tone={healthTone(status?.health?.ssh)} icon={<Terminal size={16} />} label={`SSH ${healthLabel(status?.health?.ssh)}`} />
+        <StatusPill tone={healthTone(status?.health?.rpicam)} icon={<ScanEye size={16} />} label={`Camera ${healthLabel(status?.health?.rpicam)}`} />
+        <StatusPill tone={healthTone(status?.health?.preview)} icon={<Eye size={16} />} label={`Preview ${healthLabel(status?.health?.preview)}`} />
+        <StatusPill tone={healthTone(status?.health?.disk)} icon={<HardDrive size={16} />} label={`Disk ${diskLabel(status?.health?.disk)}`} />
+        <StatusPill tone={healthTone(status?.health?.windows_pnp)} icon={<CircleAlert size={16} />} label={`PnP ${healthLabel(status?.health?.windows_pnp)}`} />
+        <StatusPill tone={serialPort === "not detected" ? "warn" : "ok"} icon={<Terminal size={16} />} label={serialPort} />
+        <StatusPill tone={cameraName === "no camera" ? "warn" : "ok"} icon={<ScanEye size={16} />} label={cameraName} />
         <StatusPill tone={moduleCount === moduleTotal ? "ok" : "warn"} icon={<Gauge size={16} />} label={`${moduleCount}/${moduleTotal} deps`} />
         <button className="icon-button" title="Refresh status" onClick={onRefresh}>
           <RefreshCw size={17} />
@@ -435,6 +615,205 @@ function PanelTitle({ icon, title, actionLabel }: { icon: ReactNode; title: stri
   );
 }
 
+function PreviewPanel({
+  previewLabel,
+  previewSrc,
+  preprocess,
+  previewMode,
+  snapshotFailed,
+  piConfigured,
+  nonce,
+  onStreamFallback,
+  onWebRTCFallback,
+  onPreviewFailed,
+  onPreviewReady,
+  onRefreshPreview,
+}: {
+  previewLabel: string;
+  previewSrc: string;
+  preprocess: PreprocessReport | null;
+  previewMode: PreviewMode;
+  snapshotFailed: boolean;
+  piConfigured: boolean;
+  nonce: number;
+  onStreamFallback: () => void;
+  onWebRTCFallback: (message: string) => void;
+  onPreviewFailed: () => void;
+  onPreviewReady: () => void;
+  onRefreshPreview: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [webrtcReady, setWebrtcReady] = useState(false);
+
+  useEffect(() => {
+    setWebrtcReady(false);
+    if (!piConfigured || previewMode !== "webrtc" || snapshotFailed) {
+      return undefined;
+    }
+    let cancelled = false;
+    let frameReceived = false;
+    let fallbackSent = false;
+    let trackReceived = false;
+    let pc: RTCPeerConnection | null = null;
+    let startupTimer: number | undefined;
+
+    const clearStartupTimer = () => {
+      if (startupTimer !== undefined) {
+        window.clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+    };
+
+    const markReady = () => {
+      if (cancelled || frameReceived) {
+        return;
+      }
+      frameReceived = true;
+      clearStartupTimer();
+      setWebrtcReady(true);
+      onPreviewReady();
+    };
+
+    const fallback = (message: string) => {
+      if (cancelled || fallbackSent || frameReceived) {
+        return;
+      }
+      fallbackSent = true;
+      clearStartupTimer();
+      pc?.close();
+      onWebRTCFallback(message);
+    };
+
+    async function startWebRTCPreview() {
+      if (!("RTCPeerConnection" in window)) {
+        throw new Error("Browser does not expose RTCPeerConnection.");
+      }
+      pc = new RTCPeerConnection();
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.onconnectionstatechange = () => {
+        if (pc?.connectionState === "failed") {
+          fallback(`WebRTC peer connection failed before a frame was received (${webrtcStateSummary(pc, trackReceived)}).`);
+        }
+      };
+      pc.ontrack = (event) => {
+        trackReceived = true;
+        const video = videoRef.current;
+        if (!video) {
+          return;
+        }
+        const stream = event.streams[0] ?? new MediaStream([event.track]);
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", markReady, { once: true });
+        video.addEventListener("playing", markReady, { once: true });
+        event.track.addEventListener("unmute", markReady, { once: true });
+        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          markReady();
+        }
+        void video.play().catch(() => undefined);
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (!pc.localDescription) {
+        throw new Error("WebRTC offer creation failed.");
+      }
+      await waitForIceGatheringComplete(pc);
+      const answer = await createPiWebRTCAnswer({
+        sdp: pc.localDescription.sdp,
+        type: "offer",
+      });
+      if (cancelled) {
+        return;
+      }
+      await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+      startupTimer = window.setTimeout(() => {
+        fallback(`No WebRTC video frame was received within 60 seconds (${webrtcStateSummary(pc, trackReceived)}).`);
+      }, 60_000);
+    }
+
+    void startWebRTCPreview().catch((error) => {
+      if (!cancelled) {
+        pc?.close();
+        onWebRTCFallback(errorMessage(error));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      clearStartupTimer();
+      if (videoRef.current?.srcObject instanceof MediaStream) {
+        videoRef.current.srcObject.getTracks().forEach((track) => track.stop());
+        videoRef.current.srcObject = null;
+      }
+      pc?.close();
+    };
+  }, [nonce, onPreviewReady, onWebRTCFallback, piConfigured, previewMode, snapshotFailed]);
+
+  return (
+    <div className="preview-panel">
+      <PanelTitle icon={<ScanEye size={18} />} title="Live Preview" actionLabel={previewLabel} />
+      <div className="preview-frame">
+        {piConfigured && previewMode === "webrtc" && !snapshotFailed ? (
+          <video ref={videoRef} aria-label="Live camera preview" autoPlay muted playsInline />
+        ) : (
+          <img
+            src={previewSrc}
+            alt="Live camera preview"
+            onError={() => {
+              if (piConfigured && previewMode === "stream") {
+                onStreamFallback();
+                return;
+              }
+              onPreviewFailed();
+            }}
+          />
+        )}
+        <button className="icon-button preview-refresh" title="Refresh preview" onClick={onRefreshPreview}>
+          <RefreshCw size={17} />
+        </button>
+      </div>
+      {previewMode === "webrtc" && !snapshotFailed ? (
+        <p className={webrtcReady ? "preview-message ok" : "preview-message"}>
+          {webrtcReady ? "WebRTC preview active." : "Starting WebRTC preview..."}
+        </p>
+      ) : null}
+      {previewMode === "stream" && !snapshotFailed ? <p className="preview-message">Using MJPEG preview fallback.</p> : null}
+      {previewMode === "snapshot" && !snapshotFailed ? (
+        <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
+      ) : null}
+      {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
+      <QualityStrip preprocess={preprocess} />
+    </div>
+  );
+}
+
+function waitForIceGatheringComplete(pc: RTCPeerConnection, timeoutMs = 5000) {
+  if (pc.iceGatheringState === "complete") {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      pc.removeEventListener("icegatheringstatechange", checkState);
+      resolve();
+    };
+    const checkState = () => {
+      if (pc.iceGatheringState === "complete") {
+        cleanup();
+      }
+    };
+    const timeout = window.setTimeout(cleanup, timeoutMs);
+    pc.addEventListener("icegatheringstatechange", checkState);
+    checkState();
+  });
+}
+
+function webrtcStateSummary(pc: RTCPeerConnection | null, trackReceived: boolean) {
+  if (!pc) {
+    return "peer not created";
+  }
+  return `peer ${pc.connectionState}, ICE ${pc.iceConnectionState}, gather ${pc.iceGatheringState}, track ${trackReceived ? "yes" : "no"}`;
+}
+
 function CapturePanel({
   capture,
   setCapture,
@@ -471,16 +850,59 @@ function CapturePanel({
           <input type="number" min={1} max={60} value={capture.count} onChange={(event) => setCapture({ ...capture, count: Number(event.target.value) })} />
         </Field>
         <Field label="Shutter us">
-          <input type="number" value={capture.shutter_us} onChange={(event) => setCapture({ ...capture, shutter_us: Number(event.target.value) })} />
+          <input
+            type="number"
+            min={0}
+            title="0 lets rpicam choose exposure automatically"
+            value={capture.shutter_us}
+            onChange={(event) => setCapture({ ...capture, shutter_us: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="ISO equiv">
+          <input
+            type="number"
+            min={0}
+            step={50}
+            title="Blank or 0 lets rpicam choose analogue gain automatically"
+            value={capture.gain > 0 ? Math.round(capture.gain * 100) : ""}
+            onChange={(event) => setCapture({ ...capture, gain: event.target.value ? Number(event.target.value) / 100 : 0 })}
+          />
         </Field>
         <Field label="Gain">
-          <input type="number" step="0.1" value={capture.gain} onChange={(event) => setCapture({ ...capture, gain: Number(event.target.value) })} />
+          <input
+            type="number"
+            min={0}
+            step="0.1"
+            value={capture.gain}
+            onChange={(event) => setCapture({ ...capture, gain: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="AWB mode">
+          <select value={capture.awb} onChange={(event) => setCapture({ ...capture, awb: event.target.value as AwbMode })}>
+            {awbModes.map((mode) => (
+              <option value={mode.value} key={mode.value}>
+                {mode.label}
+              </option>
+            ))}
+          </select>
         </Field>
         <Field label="AWB red">
-          <input type="number" step="0.1" value={capture.awb_red} onChange={(event) => setCapture({ ...capture, awb_red: Number(event.target.value) })} />
+          <input
+            type="number"
+            step="0.1"
+            disabled={capture.awb !== "manual"}
+            value={capture.awb_red}
+            onChange={(event) => setCapture({ ...capture, awb_red: Number(event.target.value) })}
+          />
         </Field>
         <Field label="AWB blue">
-          <input type="number" step="0.1" value={capture.awb_blue} onChange={(event) => setCapture({ ...capture, awb_blue: Number(event.target.value) })} />
+          <input
+            type="number"
+            step="0.1"
+            disabled={capture.awb !== "manual"}
+            value={capture.awb_blue}
+            onChange={(event) => setCapture({ ...capture, awb_blue: Number(event.target.value) })}
+          />
         </Field>
       </div>
       <div className="button-row">
@@ -501,6 +923,8 @@ function PreprocessPanel({
   sessionDir,
   setSessionDir,
   report,
+  processOptions,
+  setProcessOptions,
   busy,
   onPreprocess,
   onProcess,
@@ -508,6 +932,8 @@ function PreprocessPanel({
   sessionDir: string;
   setSessionDir: (value: string) => void;
   report: PreprocessReport | null;
+  processOptions: ProcessOptions;
+  setProcessOptions: (value: ProcessOptions) => void;
   busy: string | null;
   onPreprocess: () => void;
   onProcess: () => void;
@@ -533,6 +959,56 @@ function PreprocessPanel({
           <li key={item}>{item}</li>
         ))}
       </ul>
+      <div className="form-grid process-controls">
+        <Field label="Stack method">
+          <select
+            value={processOptions.stack_method}
+            onChange={(event) =>
+              setProcessOptions({ ...processOptions, stack_method: event.target.value as ProcessOptions["stack_method"] })
+            }
+          >
+            <option value="sigma">Sigma clip</option>
+            <option value="median">Median</option>
+            <option value="mean">Mean</option>
+          </select>
+        </Field>
+        <Field label="Sigma">
+          <input
+            type="number"
+            step="0.1"
+            min={0.1}
+            value={processOptions.sigma}
+            onChange={(event) => setProcessOptions({ ...processOptions, sigma: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Min frames">
+          <input
+            type="number"
+            min={1}
+            value={processOptions.min_frames}
+            onChange={(event) => setProcessOptions({ ...processOptions, min_frames: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Max working edge">
+          <input
+            type="number"
+            min={64}
+            value={processOptions.max_working_edge ?? ""}
+            onChange={(event) =>
+              setProcessOptions({
+                ...processOptions,
+                max_working_edge: event.target.value ? Number(event.target.value) : null,
+              })
+            }
+          />
+        </Field>
+        <Field label="Dark frame">
+          <input value={processOptions.dark_path} onChange={(event) => setProcessOptions({ ...processOptions, dark_path: event.target.value })} />
+        </Field>
+        <Field label="Flat field">
+          <input value={processOptions.flat_path} onChange={(event) => setProcessOptions({ ...processOptions, flat_path: event.target.value })} />
+        </Field>
+      </div>
       <div className="button-row">
         <button className="secondary" onClick={onPreprocess} disabled={busy !== null || !sessionDir}>
           <RefreshCw size={17} />
@@ -551,10 +1027,12 @@ function OutputPanel({
   sessionDir,
   outputs,
   processed,
+  result,
 }: {
   sessionDir: string;
   outputs: Record<string, string | null | undefined>;
   processed: boolean;
+  result: ProcessResponse | null;
 }) {
   const enhanced = outputPath(outputs, "enhanced_jpg");
   const contactSheet = outputPath(outputs, "contact_sheet");
@@ -566,6 +1044,13 @@ function OutputPanel({
   return (
     <section className="panel output-panel">
       <PanelTitle icon={<FolderOpen size={18} />} title="Output Review" actionLabel={processed ? "processed" : "not processed"} />
+      {result ? (
+        <div className={`quality-result ${result.requires_recapture ? "error" : result.quality_status === "review" ? "warn" : "ok"}`}>
+          <strong>{qualityStatusLabel(result.quality_status)}</strong>
+          <span>{result.requires_recapture ? "Recapture recommended" : "No recapture flag"}</span>
+          {result.quality_flags.length ? <small>{result.quality_flags.join(", ")}</small> : null}
+        </div>
+      ) : null}
       {!hasPreview ? <p className="empty">No processed outputs for the selected session.</p> : null}
       {hasPreview ? (
         <div className="output-grid">
@@ -628,6 +1113,13 @@ function LabelPanel({
         <Field label="Subject code">
           <input value={label.subject_code} onChange={(event) => setLabel({ ...label, subject_code: event.target.value })} />
         </Field>
+        <Field label="Eye">
+          <select value={label.eye} onChange={(event) => setLabel({ ...label, eye: event.target.value })}>
+            <option value="">Unspecified</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </Field>
         <Field label="Quality">
           <select value={label.quality_label} onChange={(event) => setLabel({ ...label, quality_label: event.target.value })}>
             <option value="unreviewed">Unreviewed</option>
@@ -636,11 +1128,33 @@ function LabelPanel({
             <option value="exclude">Exclude</option>
           </select>
         </Field>
+        <Field label="Operator">
+          <input value={label.operator} onChange={(event) => setLabel({ ...label, operator: event.target.value })} />
+        </Field>
+        <Field label="Allowed use">
+          <input value={label.allowed_use} onChange={(event) => setLabel({ ...label, allowed_use: event.target.value })} />
+        </Field>
+        <Field label="Biometric category">
+          <input value={label.biometric_category} onChange={(event) => setLabel({ ...label, biometric_category: event.target.value })} />
+        </Field>
         <Field label="Lighting">
           <input value={label.lighting} onChange={(event) => setLabel({ ...label, lighting: event.target.value })} />
         </Field>
         <Field label="Lens">
           <input value={label.lens} onChange={(event) => setLabel({ ...label, lens: event.target.value })} />
+        </Field>
+        <Field label="Distance mm">
+          <input
+            type="number"
+            min={1}
+            value={label.capture_distance_mm ?? ""}
+            onChange={(event) =>
+              setLabel({ ...label, capture_distance_mm: event.target.value ? Number(event.target.value) : null })
+            }
+          />
+        </Field>
+        <Field label="Tags">
+          <input value={label.tags.join(", ")} onChange={(event) => setLabel({ ...label, tags: parseTags(event.target.value) })} />
         </Field>
       </div>
       <label className="checkbox-line">
@@ -662,10 +1176,302 @@ function LabelPanel({
       <Field label="Notes">
         <textarea value={label.notes} onChange={(event) => setLabel({ ...label, notes: event.target.value })} />
       </Field>
+      {label.updated_at ? <p className="field-note">Updated {label.updated_at}</p> : null}
       <button className="primary full" disabled={busy !== null || !sessionDir} onClick={onSave}>
         <Save size={17} />
         Save Label
       </button>
+    </section>
+  );
+}
+
+function SettingsPanel({
+  settings,
+  setSettings,
+  busy,
+  onSave,
+}: {
+  settings: ConfigPayload | null;
+  setSettings: (value: ConfigPayload | null) => void;
+  busy: string | null;
+  onSave: () => void | Promise<void> | undefined;
+}) {
+  if (!settings) {
+    return (
+      <section className="panel settings-panel">
+        <PanelTitle icon={<Settings size={18} />} title="Settings" />
+        <p className="empty">Configuration has not loaded yet.</p>
+      </section>
+    );
+  }
+  const updatePi = (patch: Partial<ConfigPayload["pi"]>) => setSettings({ ...settings, pi: { ...settings.pi, ...patch } });
+  const updateCapture = (patch: Partial<ConfigPayload["capture"]>) =>
+    setSettings({ ...settings, capture: { ...settings.capture, ...patch } });
+  const updatePreview = (patch: Partial<ConfigPayload["preview"]>) =>
+    setSettings({ ...settings, preview: { ...settings.preview, ...patch } });
+  const updateProcessing = (patch: Partial<ConfigPayload["processing"]>) =>
+    setSettings({ ...settings, processing: { ...settings.processing, ...patch } });
+
+  return (
+    <section className="panel settings-panel">
+      <PanelTitle icon={<Settings size={18} />} title="Settings" actionLabel="writes .iriscope.toml" />
+      <h3>Pi</h3>
+      <div className="form-grid">
+        <Field label="Host">
+          <input value={settings.pi.host ?? ""} onChange={(event) => updatePi({ host: event.target.value || null })} />
+        </Field>
+        <Field label="User">
+          <input value={settings.pi.user} onChange={(event) => updatePi({ user: event.target.value })} />
+        </Field>
+        <Field label="Port">
+          <input type="number" min={1} value={settings.pi.port} onChange={(event) => updatePi({ port: Number(event.target.value) })} />
+        </Field>
+        <Field label="Remote root">
+          <input value={settings.pi.remote_root} onChange={(event) => updatePi({ remote_root: event.target.value })} />
+        </Field>
+        <Field label="SSH key">
+          <input value={settings.pi.ssh_key ?? ""} onChange={(event) => updatePi({ ssh_key: event.target.value || null })} />
+        </Field>
+        <Field label="Connect timeout">
+          <input
+            type="number"
+            min={1}
+            value={settings.pi.connect_timeout}
+            onChange={(event) => updatePi({ connect_timeout: Number(event.target.value) })}
+          />
+        </Field>
+      </div>
+
+      <h3>Capture</h3>
+      <div className="form-grid">
+        <Field label="Frames">
+          <input type="number" min={1} value={settings.capture.count} onChange={(event) => updateCapture({ count: Number(event.target.value) })} />
+        </Field>
+        <Field label="Shutter us">
+          <input
+            type="number"
+            min={0}
+            title="0 lets rpicam choose exposure automatically"
+            value={settings.capture.shutter_us}
+            onChange={(event) => updateCapture({ shutter_us: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="ISO equiv">
+          <input
+            type="number"
+            min={0}
+            step={50}
+            title="Blank or 0 lets rpicam choose analogue gain automatically"
+            value={settings.capture.gain > 0 ? Math.round(settings.capture.gain * 100) : ""}
+            onChange={(event) => updateCapture({ gain: event.target.value ? Number(event.target.value) / 100 : 0 })}
+          />
+        </Field>
+        <Field label="Gain">
+          <input type="number" min={0} step="0.1" value={settings.capture.gain} onChange={(event) => updateCapture({ gain: Number(event.target.value) })} />
+        </Field>
+        <Field label="AWB mode">
+          <select value={settings.capture.awb} onChange={(event) => updateCapture({ awb: event.target.value as AwbMode })}>
+            {awbModes.map((mode) => (
+              <option value={mode.value} key={mode.value}>
+                {mode.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="AWB red">
+          <input
+            type="number"
+            step="0.1"
+            disabled={settings.capture.awb !== "manual"}
+            value={awbGain(settings.capture.awb_gains, 0)}
+            onChange={(event) => updateCapture({ awb_gains: [Number(event.target.value), awbGain(settings.capture.awb_gains, 1)] })}
+          />
+        </Field>
+        <Field label="AWB blue">
+          <input
+            type="number"
+            step="0.1"
+            disabled={settings.capture.awb !== "manual"}
+            value={awbGain(settings.capture.awb_gains, 1)}
+            onChange={(event) => updateCapture({ awb_gains: [awbGain(settings.capture.awb_gains, 0), Number(event.target.value)] })}
+          />
+        </Field>
+        <Field label="Metering">
+          <select value={settings.capture.metering} onChange={(event) => updateCapture({ metering: event.target.value as MeteringMode })}>
+            {meteringModes.map((mode) => (
+              <option value={mode.value} key={mode.value}>
+                {mode.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Exposure">
+          <select value={settings.capture.exposure} onChange={(event) => updateCapture({ exposure: event.target.value as ExposureMode })}>
+            {exposureModes.map((mode) => (
+              <option value={mode.value} key={mode.value}>
+                {mode.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="EV">
+          <input type="number" step="0.1" min={-10} max={10} value={settings.capture.ev} onChange={(event) => updateCapture({ ev: Number(event.target.value) })} />
+        </Field>
+        <Field label="Denoise">
+          <select value={settings.capture.denoise} onChange={(event) => updateCapture({ denoise: event.target.value as ConfigPayload["capture"]["denoise"] })}>
+            <option value="off">Off</option>
+            <option value="auto">Auto</option>
+            <option value="cdn_off">CDN off</option>
+            <option value="cdn_fast">CDN fast</option>
+            <option value="cdn_hq">CDN high quality</option>
+          </select>
+        </Field>
+        <Field label="Quality">
+          <input type="number" min={1} max={100} value={settings.capture.quality} onChange={(event) => updateCapture({ quality: Number(event.target.value) })} />
+        </Field>
+        <Field label="Brightness">
+          <input type="number" step="0.05" min={-1} max={1} value={settings.capture.brightness} onChange={(event) => updateCapture({ brightness: Number(event.target.value) })} />
+        </Field>
+        <Field label="Contrast">
+          <input type="number" step="0.1" min={0} value={settings.capture.contrast} onChange={(event) => updateCapture({ contrast: Number(event.target.value) })} />
+        </Field>
+        <Field label="Saturation">
+          <input type="number" step="0.1" min={0} value={settings.capture.saturation} onChange={(event) => updateCapture({ saturation: Number(event.target.value) })} />
+        </Field>
+        <Field label="Sharpness">
+          <input type="number" step="0.1" min={0} value={settings.capture.sharpness} onChange={(event) => updateCapture({ sharpness: Number(event.target.value) })} />
+        </Field>
+        <Field label="Tuning file">
+          <select value={settings.capture.tuning_file ?? ""} onChange={(event) => updateCapture({ tuning_file: event.target.value || null })}>
+            {tuningFileOptions.map((option) => (
+              <option value={option.value} key={option.value || "default"}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Sensor mode">
+          <input value={settings.capture.mode ?? ""} onChange={(event) => updateCapture({ mode: event.target.value || null })} />
+        </Field>
+        <Field label="HDR">
+          <select value={settings.capture.hdr} onChange={(event) => updateCapture({ hdr: event.target.value as HdrMode })}>
+            {hdrModes.map((mode) => (
+              <option value={mode.value} key={mode.value}>
+                {mode.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Width">
+          <input
+            type="number"
+            value={settings.capture.width ?? ""}
+            onChange={(event) => updateCapture({ width: event.target.value ? Number(event.target.value) : null })}
+          />
+        </Field>
+        <Field label="Height">
+          <input
+            type="number"
+            value={settings.capture.height ?? ""}
+            onChange={(event) => updateCapture({ height: event.target.value ? Number(event.target.value) : null })}
+          />
+        </Field>
+      </div>
+      <label className="checkbox-line">
+        <input type="checkbox" checked={settings.capture.raw} onChange={(event) => updateCapture({ raw: event.target.checked })} />
+        Capture RAW/DNG
+      </label>
+      <label className="checkbox-line">
+        <input type="checkbox" checked={settings.capture.nopreview} onChange={(event) => updateCapture({ nopreview: event.target.checked })} />
+        Disable rpicam preview window
+      </label>
+
+      <h3>Preview</h3>
+      <div className="form-grid">
+        <Field label="Width">
+          <input type="number" min={64} value={settings.preview.width} onChange={(event) => updatePreview({ width: Number(event.target.value) })} />
+        </Field>
+        <Field label="Height">
+          <input type="number" min={64} value={settings.preview.height} onChange={(event) => updatePreview({ height: Number(event.target.value) })} />
+        </Field>
+        <Field label="Framerate">
+          <input type="number" min={1} value={settings.preview.framerate} onChange={(event) => updatePreview({ framerate: Number(event.target.value) })} />
+        </Field>
+        <Field label="Quality">
+          <input type="number" min={1} max={100} value={settings.preview.quality} onChange={(event) => updatePreview({ quality: Number(event.target.value) })} />
+        </Field>
+        <Field label="Stream timeout s">
+          <input
+            type="number"
+            min={0}
+            value={settings.preview.stream_timeout_s}
+            onChange={(event) => updatePreview({ stream_timeout_s: Number(event.target.value) })}
+          />
+        </Field>
+      </div>
+
+      <h3>Processing Defaults</h3>
+      <div className="form-grid">
+        <Field label="Stack method">
+          <select
+            value={settings.processing.stack_method}
+            onChange={(event) => updateProcessing({ stack_method: event.target.value as ConfigPayload["processing"]["stack_method"] })}
+          >
+            <option value="sigma">Sigma clip</option>
+            <option value="median">Median</option>
+            <option value="mean">Mean</option>
+          </select>
+        </Field>
+        <Field label="Sigma">
+          <input type="number" step="0.1" min={0.1} value={settings.processing.sigma} onChange={(event) => updateProcessing({ sigma: Number(event.target.value) })} />
+        </Field>
+        <Field label="Min frames">
+          <input type="number" min={1} value={settings.processing.min_frames} onChange={(event) => updateProcessing({ min_frames: Number(event.target.value) })} />
+        </Field>
+        <Field label="Max working edge">
+          <input
+            type="number"
+            min={64}
+            value={settings.processing.max_working_edge ?? ""}
+            onChange={(event) => updateProcessing({ max_working_edge: event.target.value ? Number(event.target.value) : null })}
+          />
+        </Field>
+      </div>
+      <label className="checkbox-line">
+        <input
+          type="checkbox"
+          checked={settings.processing.save_intermediates}
+          onChange={(event) => updateProcessing({ save_intermediates: event.target.checked })}
+        />
+        Save stacked image and iris mask
+      </label>
+      <button className="primary full" disabled={busy !== null} onClick={() => void onSave()}>
+        <Save size={17} />
+        Save Settings
+      </button>
+    </section>
+  );
+}
+
+function HealthPanel({ status }: { status: StatusResponse | null }) {
+  const checks: Array<[string, HealthCheck | undefined]> = [
+    ["SSH", status?.health?.ssh],
+    ["rpicam-hello", status?.health?.rpicam],
+    ["Preview frame", status?.health?.preview],
+    ["Remote disk", status?.health?.disk],
+    ["Windows PnP", status?.health?.windows_pnp],
+  ];
+  return (
+    <section className="panel health-panel">
+      <PanelTitle icon={<Activity size={18} />} title="Health Checks" />
+      <div className="health-list">
+        {checks.map(([label, check]) => (
+          <div className={`health-row ${healthTone(check)}`} key={label}>
+            <strong>{label}</strong>
+            <span>{check?.message ?? "Not checked yet."}</span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -757,6 +1563,58 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function healthTone(check: HealthCheck | undefined): "ok" | "warn" | "error" {
+  if (!check) {
+    return "warn";
+  }
+  if (check.ok) {
+    return "ok";
+  }
+  return check.status === "skipped" || check.status === "warming_up" || check.status === "not_applicable" || check.status === "busy"
+    ? "warn"
+    : "error";
+}
+
+function healthLabel(check: HealthCheck | undefined) {
+  if (!check) {
+    return "pending";
+  }
+  if (check.ok) {
+    return "ok";
+  }
+  return check.status.replaceAll("_", " ");
+}
+
+function diskLabel(check: HealthCheck | undefined) {
+  if (!check) {
+    return "pending";
+  }
+  if (typeof check.free_gb === "number") {
+    return `${check.free_gb.toFixed(1)} GB`;
+  }
+  return healthLabel(check);
+}
+
+function qualityStatusLabel(status: ProcessResponse["quality_status"]) {
+  if (status === "requires_recapture") {
+    return "Requires recapture";
+  }
+  if (status === "review") {
+    return "Needs review";
+  }
+  if (status === "pass") {
+    return "Quality pass";
+  }
+  return "Quality unknown";
+}
+
+function parseTags(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function captureFromStatus(status: StatusResponse): CaptureForm {
   const capture = status.config.capture;
   return {
@@ -765,8 +1623,75 @@ function captureFromStatus(status: StatusResponse): CaptureForm {
     count: capture.count,
     shutter_us: capture.shutter_us,
     gain: capture.gain,
-    awb_red: Number(capture.awb_gains[0] ?? defaultCapture.awb_red),
-    awb_blue: Number(capture.awb_gains[1] ?? defaultCapture.awb_blue),
+    awb: capture.awb ?? defaultCapture.awb,
+    awb_red: awbGain(capture.awb_gains, 0),
+    awb_blue: awbGain(capture.awb_gains, 1),
+  };
+}
+
+function processFromStatus(status: StatusResponse): ProcessOptions {
+  const processing = status.config.processing;
+  return {
+    stack_method: processing.stack_method,
+    sigma: processing.sigma,
+    min_frames: processing.min_frames,
+    max_working_edge: processing.max_working_edge ?? null,
+    dark_path: "",
+    flat_path: "",
+  };
+}
+
+function configFromStatus(status: StatusResponse): ConfigPayload {
+  const capture = status.config.capture;
+  const preview = status.config.preview;
+  const processing = status.config.processing;
+  return {
+    pi: {
+      host: status.config.pi_host,
+      user: status.config.pi_user,
+      port: status.config.pi_port ?? 22,
+      remote_root: status.config.remote_root,
+      ssh_key: status.config.ssh_key ?? null,
+      connect_timeout: status.config.connect_timeout ?? 15,
+    },
+    capture: {
+      count: capture.count,
+      shutter_us: capture.shutter_us,
+      gain: capture.gain,
+      awb: capture.awb ?? "auto",
+      awb_gains: [awbGain(capture.awb_gains, 0), awbGain(capture.awb_gains, 1)],
+      denoise: capture.denoise as ConfigPayload["capture"]["denoise"],
+      quality: capture.quality,
+      width: capture.width ?? null,
+      height: capture.height ?? null,
+      metering: capture.metering ?? "centre",
+      exposure: capture.exposure ?? "normal",
+      ev: capture.ev ?? 0,
+      brightness: capture.brightness ?? 0,
+      contrast: capture.contrast ?? 1,
+      saturation: capture.saturation ?? 1,
+      sharpness: capture.sharpness ?? 1,
+      tuning_file: capture.tuning_file ?? null,
+      mode: capture.mode ?? null,
+      hdr: capture.hdr ?? "off",
+      nopreview: capture.nopreview ?? true,
+      immediate: capture.immediate ?? true,
+      raw: capture.raw ?? true,
+    },
+    preview: {
+      width: preview.width,
+      height: preview.height,
+      framerate: preview.framerate,
+      quality: preview.quality,
+      stream_timeout_s: preview.stream_timeout_s,
+    },
+    processing: {
+      stack_method: processing.stack_method,
+      sigma: processing.sigma,
+      min_frames: processing.min_frames,
+      save_intermediates: processing.save_intermediates,
+      max_working_edge: processing.max_working_edge ?? null,
+    },
   };
 }
 
@@ -783,4 +1708,26 @@ function withSessionFallback(label: LabelRecord, sessionDir: string): LabelRecor
 
 function outputPath(outputs: Record<string, string | null | undefined>, key: string) {
   return outputs[key] || "";
+}
+
+function withLivePreviewOk(status: StatusResponse | null): StatusResponse | null {
+  if (!status) {
+    return status;
+  }
+  return {
+    ...status,
+    health: {
+      ...status.health,
+      preview: {
+        ok: true,
+        status: "ok",
+        message: "WebRTC preview frame received.",
+      },
+    },
+  };
+}
+
+function awbGain(gains: [number, number] | number[] | null | undefined, index: 0 | 1) {
+  const fallback = index === 0 ? defaultCapture.awb_red : defaultCapture.awb_blue;
+  return Number(gains?.[index] ?? fallback);
 }

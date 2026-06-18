@@ -152,11 +152,16 @@ rpicam-hello --list-cameras
 
 echo "Capturing DNG/JPEG smoke-test frame..."
 cd "${OUT_DIR}"
+TUNING_ARGS=()
+if [ -f /usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json ]; then
+  TUNING_ARGS=(--tuning-file /usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json)
+fi
 rpicam-still --raw --immediate --nopreview \
-  --shutter 8000 \
-  --gain 1 \
-  --awbgains 1.8,1.4 \
-  --denoise off \
+  "${TUNING_ARGS[@]}" \
+  --awb auto \
+  --metering centre \
+  --exposure normal \
+  --denoise cdn_fast \
   --metadata smoke.json \
   --metadata-format json \
   --quality 95 \

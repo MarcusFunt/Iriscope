@@ -54,9 +54,7 @@ def build_rpicam_command(
         args += ["--width", str(settings.width)]
     if settings.height:
         args += ["--height", str(settings.height)]
-    args += ["--shutter", str(settings.shutter_us)]
-    args += ["--gain", _format_float(settings.gain)]
-    args += ["--awbgains", f"{_format_float(settings.awb_gains[0])},{_format_float(settings.awb_gains[1])}"]
+    _extend_camera_options(args, settings)
     args += ["--denoise", settings.denoise]
     args += ["--quality", str(settings.quality)]
     if metadata_file:
@@ -85,17 +83,9 @@ def build_rpicam_mjpeg_command(
         str(preview.framerate),
         "--quality",
         str(preview.quality),
-        "--shutter",
-        str(settings.shutter_us),
-        "--gain",
-        _format_float(settings.gain),
-        "--awbgains",
-        f"{_format_float(settings.awb_gains[0])},{_format_float(settings.awb_gains[1])}",
-        "--denoise",
-        settings.denoise,
-        "-o",
-        output_file,
     ]
+    _extend_camera_options(args, settings)
+    args += ["--denoise", settings.denoise, "-o", output_file]
     return args
 
 
@@ -177,3 +167,34 @@ def posix_join(*parts: str) -> str:
 
 def _format_float(value: float) -> str:
     return f"{float(value):g}"
+
+
+def _extend_camera_options(args: list[str], settings: CaptureSettings) -> None:
+    if settings.tuning_file:
+        args += ["--tuning-file", settings.tuning_file]
+    if settings.mode:
+        args += ["--mode", settings.mode]
+    if settings.shutter_us > 0:
+        args += ["--shutter", str(settings.shutter_us)]
+    if settings.gain > 0:
+        args += ["--gain", _format_float(settings.gain)]
+
+    awb = settings.awb.strip().lower()
+    if awb == "manual":
+        if settings.awb_gains is not None:
+            args += ["--awbgains", f"{_format_float(settings.awb_gains[0])},{_format_float(settings.awb_gains[1])}"]
+    elif awb:
+        args += ["--awb", awb]
+
+    if settings.metering:
+        args += ["--metering", settings.metering]
+    if settings.exposure:
+        args += ["--exposure", settings.exposure]
+    if settings.ev:
+        args += ["--ev", _format_float(settings.ev)]
+    args += ["--brightness", _format_float(settings.brightness)]
+    args += ["--contrast", _format_float(settings.contrast)]
+    args += ["--saturation", _format_float(settings.saturation)]
+    args += ["--sharpness", _format_float(settings.sharpness)]
+    if settings.hdr and settings.hdr != "off":
+        args += ["--hdr", settings.hdr]

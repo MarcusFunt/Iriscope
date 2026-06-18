@@ -34,11 +34,21 @@ remote_root = "/home/pi/iriscope"
 
 [capture]
 count = 12
-shutter_us = 8000
-gain = 1.0
-awb_gains = [1.8, 1.4]
-denoise = "off"
+shutter_us = 0
+gain = 0
+awb = "auto"
+awb_gains = [3.2, 1.4]
+denoise = "cdn_fast"
 quality = 95
+metering = "centre"
+exposure = "normal"
+ev = 0
+brightness = 0
+contrast = 1
+saturation = 1
+sharpness = 1
+# tuning_file = "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json"
+hdr = "off"
 nopreview = true
 
 [preview]
@@ -254,13 +264,29 @@ def _add_pi_options(parser: argparse.ArgumentParser) -> None:
 def _add_capture_options(parser: argparse.ArgumentParser, include_count: bool) -> None:
     if include_count:
         parser.add_argument("--count", type=int, help="Number of frames to capture.")
-    parser.add_argument("--shutter", type=int, dest="shutter_us", help="Manual shutter time in microseconds.")
-    parser.add_argument("--gain", type=float, help="Manual analogue gain.")
-    parser.add_argument("--awb-gains", help="Fixed AWB gains as red,blue, for example 1.8,1.4.")
+    parser.add_argument("--shutter", type=int, dest="shutter_us", help="Manual shutter time in microseconds. Use 0 for auto exposure.")
+    parser.add_argument("--gain", type=float, help="Manual analogue gain. Use 0 for auto gain.")
+    parser.add_argument("--iso", type=float, dest="iso_equivalent", help="ISO-equivalent analogue gain. ISO 400 maps to gain 4.")
+    parser.add_argument(
+        "--awb",
+        choices=["auto", "incandescent", "tungsten", "fluorescent", "indoor", "daylight", "cloudy", "custom", "manual"],
+        help="rpicam AWB mode. Use manual with --awb-gains.",
+    )
+    parser.add_argument("--awb-gains", help="Fixed AWB gains as red,blue, for example 3.2,1.4.")
     parser.add_argument("--denoise", choices=["auto", "off", "cdn_off", "cdn_fast", "cdn_hq"], help="rpicam denoise mode.")
     parser.add_argument("--quality", type=int, help="JPEG quality for preview files.")
     parser.add_argument("--width", type=int, help="Optional output width.")
     parser.add_argument("--height", type=int, help="Optional output height.")
+    parser.add_argument("--metering", choices=["centre", "spot", "average", "custom"], help="rpicam metering mode.")
+    parser.add_argument("--exposure", choices=["normal", "sport"], help="rpicam exposure profile.")
+    parser.add_argument("--ev", type=float, help="Exposure value compensation.")
+    parser.add_argument("--brightness", type=float, help="Brightness adjustment, usually -1 to 1.")
+    parser.add_argument("--contrast", type=float, help="Contrast adjustment.")
+    parser.add_argument("--saturation", type=float, help="Saturation adjustment.")
+    parser.add_argument("--sharpness", type=float, help="Sharpness adjustment.")
+    parser.add_argument("--tuning-file", help="Path to a libcamera tuning file on the Pi.")
+    parser.add_argument("--mode", help="Sensor mode string such as 2028:1080:12:P.")
+    parser.add_argument("--hdr", choices=["off", "auto", "sensor", "single-exp"], help="rpicam HDR mode.")
 
 
 def _add_processing_options(parser: argparse.ArgumentParser) -> None:
@@ -288,16 +314,31 @@ def _pi_from_args(args: argparse.Namespace, base):
 
 
 def _capture_from_args(args: argparse.Namespace, base: CaptureSettings) -> CaptureSettings:
+    gain = getattr(args, "gain", None)
+    iso_equivalent = getattr(args, "iso_equivalent", None)
+    if gain is None and iso_equivalent is not None:
+        gain = iso_equivalent / 100
     return merge_capture(
         base,
         count=getattr(args, "count", None),
         shutter_us=getattr(args, "shutter_us", None),
-        gain=getattr(args, "gain", None),
+        gain=gain,
+        awb=getattr(args, "awb", None),
         awb_gains=getattr(args, "awb_gains", None),
         denoise=getattr(args, "denoise", None),
         quality=getattr(args, "quality", None),
         width=getattr(args, "width", None),
         height=getattr(args, "height", None),
+        metering=getattr(args, "metering", None),
+        exposure=getattr(args, "exposure", None),
+        ev=getattr(args, "ev", None),
+        brightness=getattr(args, "brightness", None),
+        contrast=getattr(args, "contrast", None),
+        saturation=getattr(args, "saturation", None),
+        sharpness=getattr(args, "sharpness", None),
+        tuning_file=getattr(args, "tuning_file", None),
+        mode=getattr(args, "mode", None),
+        hdr=getattr(args, "hdr", None),
     )
 
 

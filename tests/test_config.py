@@ -31,6 +31,7 @@ max_working_edge = 640
     assert config.pi.host == "pi.local"
     assert config.pi.user == "camera"
     assert config.capture.count == 16
+    assert config.capture.awb == "manual"
     assert config.capture.awb_gains == (2.0, 1.2)
     assert config.preview.width == 800
     assert config.preview.height == 480

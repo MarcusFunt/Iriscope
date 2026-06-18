@@ -17,6 +17,7 @@ const pngPixel = Buffer.from(
 test("main workstation flow loads config, labels, preprocesses, processes, and saves", async ({ page }) => {
   let processed = false;
   let savedLabel: Record<string, unknown> | null = null;
+  let piWebrtcRequested = false;
   let piStreamRequested = false;
 
   await page.route("**/api/status", async (route) => {
@@ -28,15 +29,35 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
           path: "C:/Iriscope/.iriscope.toml",
           pi_host: "iriscope-pi.local",
           pi_user: "camera",
+          pi_port: 22,
           remote_root: "/home/camera/iriscope",
+          ssh_key: "C:/Iriscope/id_rsa",
+          connect_timeout: 15,
           capture: {
             count: 16,
-            shutter_us: 6000,
-            gain: 1.5,
-            awb_gains: [2.0, 1.2],
-            denoise: "off",
+            shutter_us: 0,
+            gain: 0,
+            iso_equivalent: 0,
+            awb: "auto",
+            awb_gains: [3.2, 1.4],
+            denoise: "cdn_fast",
             quality: 95,
-            command_preview: "rpicam-still --raw -o frame_0001.jpg",
+            width: null,
+            height: null,
+            metering: "centre",
+            exposure: "normal",
+            ev: 0,
+            brightness: 0,
+            contrast: 1,
+            saturation: 1,
+            sharpness: 1,
+            tuning_file: "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json",
+            mode: null,
+            hdr: "off",
+            nopreview: true,
+            immediate: true,
+            raw: true,
+            command_preview: "rpicam-still --raw --awb auto --tuning-file /usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json -o frame_0001.jpg",
           },
           preview: {
             width: 640,
@@ -47,14 +68,21 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
             command_preview: "rpicam-vid -t 0 -n --codec mjpeg -o -",
             media_type: "multipart/x-mixed-replace; boundary=iriscope-frame",
           },
-          processing: { stack_method: "sigma", sigma: 2.5, min_frames: 3 },
+          processing: { stack_method: "sigma", sigma: 2.5, min_frames: 3, save_intermediates: true, max_working_edge: null },
+        },
+        health: {
+          ssh: { ok: true, status: "ok", message: "SSH key access verified." },
+          rpicam: { ok: true, status: "ok", message: "0 : imx477 [4056x3040 12-bit RGGB]" },
+          preview: { ok: true, status: "ok", message: "Preview frame received.", frame_bytes: 1234 },
+          disk: { ok: true, status: "ok", message: "4.2 GB free", free_gb: 4.2 },
+          windows_pnp: { ok: true, status: "ok", message: "1 camera device reports OK." },
         },
         tools: {
           python_modules: { cv2: true, rawpy: true, numpy: true, PIL: true, serial: true },
           executables: { ssh: true, scp: true, ffmpeg: true },
         },
         serial_ports: ["COM22"],
-        camera_devices: [{ name: "UVC Camera", instance_id: "USB\\VID_1D6B&PID_0104", source: "pnp" }],
+        camera_devices: [{ name: "UVC Camera", instance_id: "USB\\VID_1D6B&PID_0104", source: "pnp", status: "OK" }],
         capture_root: "C:/Iriscope/captures",
       },
     });
@@ -132,7 +160,21 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
 
   await page.route("**/api/process", async (route) => {
     processed = true;
-    await route.fulfill({ json: { ok: true, output_dir: `${sessionDir}/processed`, ...outputPaths } });
+    await route.fulfill({
+      json: {
+        ok: true,
+        output_dir: `${sessionDir}/processed`,
+        ...outputPaths,
+        quality_status: "pass",
+        requires_recapture: false,
+        quality_flags: [],
+      },
+    });
+  });
+
+  await page.route("**/api/pi/webrtc/offer", async (route) => {
+    piWebrtcRequested = true;
+    await route.fulfill({ status: 503, json: { detail: "WebRTC unavailable in smoke test" } });
   });
 
   await page.route("**/api/pi/stream.mjpeg**", async (route) => {
@@ -153,14 +195,19 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
 
   await expect(page.getByRole("heading", { name: "Capture workstation" })).toBeVisible();
   await expect(page.getByText("Pi HQ camera")).toBeVisible();
+  await expect.poll(() => piWebrtcRequested).toBe(true);
   await expect.poll(() => piStreamRequested).toBe(true);
   await expect(page.getByLabel("Frames")).toHaveValue("16");
-  await expect(page.getByLabel("Shutter us")).toHaveValue("6000");
-  await expect(page.getByLabel("Gain")).toHaveValue("1.5");
-  await expect(page.getByLabel("AWB red")).toHaveValue("2");
+  await expect(page.getByLabel("Shutter us")).toHaveValue("0");
+  await expect(page.getByRole("spinbutton", { name: "Gain" })).toHaveValue("0");
+  await expect(page.getByLabel("AWB mode")).toHaveValue("auto");
+  await expect(page.getByLabel("AWB red")).toHaveValue("3.2");
+
+  await page.getByRole("button", { name: "Label" }).click();
   await expect(page.getByLabel("Subject code")).toHaveValue("S042");
   await expect(page.getByLabel("Notes")).toHaveValue("existing note");
 
+  await page.getByRole("button", { name: "Preprocess" }).click();
   await page.getByRole("button", { name: "Inspect Frames" }).click();
   await expect(page.getByText("Frames are ready for alignment and stacking.")).toBeVisible();
   await expect(page.getByText("42.5").first()).toBeVisible();
@@ -170,6 +217,7 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.getByRole("link", { name: "Report JSON" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Review" })).toBeEnabled();
 
+  await page.getByRole("button", { name: "Label" }).click();
   await page.getByLabel("Notes").fill("approved for local review");
   await page.getByRole("button", { name: "Save Label" }).click();
   await expect.poll(() => savedLabel?.notes).toBe("approved for local review");

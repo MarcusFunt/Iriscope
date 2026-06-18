@@ -1,4 +1,14 @@
-import type { LabelRecord, PreprocessReport, ProcessResponse, SessionRecord, StatusResponse } from "./types";
+import type {
+  ConfigPayload,
+  LabelRecord,
+  PreprocessReport,
+  ProcessOptions,
+  ProcessResponse,
+  SessionRecord,
+  StatusResponse,
+  WebRTCAnswerPayload,
+  WebRTCOfferPayload,
+} from "./types";
 
 type ApiErrorPayload = {
   detail?: string;
@@ -33,13 +43,18 @@ export function preprocessSession(sessionDir: string, maxFrames = 16) {
   });
 }
 
-export function processSession(sessionDir: string) {
+export function processSession(sessionDir: string, options: ProcessOptions) {
   return apiPost<ProcessResponse>("/api/process", {
     session_dir: sessionDir,
-    stack_method: "sigma",
-    sigma: 2.5,
-    min_frames: 3,
+    ...options,
+    max_working_edge: options.max_working_edge || null,
+    dark_path: options.dark_path || null,
+    flat_path: options.flat_path || null,
   });
+}
+
+export function saveConfig(config: ConfigPayload) {
+  return apiPost<{ ok: boolean; path: string; config: unknown }>("/api/config", config);
 }
 
 export function getLabel(sessionDir: string) {
@@ -67,6 +82,10 @@ export function piSnapshotUrl(nonce: number) {
 export function piStreamUrl(nonce: number) {
   const params = new URLSearchParams({ t: String(nonce) });
   return `/api/pi/stream.mjpeg?${params.toString()}`;
+}
+
+export function createPiWebRTCAnswer(offer: WebRTCOfferPayload) {
+  return apiPost<WebRTCAnswerPayload>("/api/pi/webrtc/offer", offer);
 }
 
 export function artifactUrl(path: string) {

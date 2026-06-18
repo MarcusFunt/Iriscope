@@ -3,13 +3,36 @@ export type ToolStatus = {
   executables: Record<string, boolean>;
 };
 
+export type AwbMode = "auto" | "incandescent" | "tungsten" | "fluorescent" | "indoor" | "daylight" | "cloudy" | "custom" | "manual";
+export type MeteringMode = "centre" | "spot" | "average" | "custom";
+export type ExposureMode = "normal" | "sport";
+export type HdrMode = "off" | "auto" | "sensor" | "single-exp";
+export type DenoiseMode = "auto" | "off" | "cdn_off" | "cdn_fast" | "cdn_hq";
+
 export type CaptureSettings = {
   count: number;
   shutter_us: number;
   gain: number;
-  awb_gains: [number, number] | number[];
-  denoise: string;
+  iso_equivalent: number;
+  awb: AwbMode;
+  awb_gains: [number, number] | number[] | null;
+  denoise: DenoiseMode;
   quality: number;
+  width?: number | null;
+  height?: number | null;
+  metering: MeteringMode;
+  exposure: ExposureMode;
+  ev: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  sharpness: number;
+  tuning_file?: string | null;
+  mode?: string | null;
+  hdr: HdrMode;
+  nopreview?: boolean;
+  immediate?: boolean;
+  raw?: boolean;
   command_preview: string;
 };
 
@@ -23,6 +46,42 @@ export type PreviewSettings = {
   media_type: string;
 };
 
+export type ProcessingSettings = {
+  stack_method: "sigma" | "median" | "mean";
+  sigma: number;
+  min_frames: number;
+  save_intermediates: boolean;
+  max_working_edge?: number | null;
+};
+
+export type HealthCheck = {
+  ok: boolean;
+  status: string;
+  message: string;
+  elapsed_ms?: number;
+  frame_bytes?: number;
+  free_gb?: number;
+  used_percent?: string;
+  devices?: CameraDevice[];
+  problem_devices?: CameraDevice[];
+  [key: string]: unknown;
+};
+
+export type HealthStatus = {
+  ssh: HealthCheck;
+  rpicam: HealthCheck;
+  preview: HealthCheck;
+  disk: HealthCheck;
+  windows_pnp: HealthCheck;
+};
+
+export type CameraDevice = {
+  name: string;
+  instance_id?: string;
+  source?: string;
+  status?: string;
+};
+
 export type StatusResponse = {
   platform: {
     system: string;
@@ -34,15 +93,62 @@ export type StatusResponse = {
     path: string;
     pi_host: string | null;
     pi_user: string;
+    pi_port: number;
     remote_root: string;
+    ssh_key: string | null;
+    connect_timeout: number;
     capture: CaptureSettings;
     preview: PreviewSettings;
-    processing: Record<string, unknown>;
+    processing: ProcessingSettings;
   };
   tools: ToolStatus;
   serial_ports: string[];
-  camera_devices: Array<{ name: string; instance_id?: string; source?: string }>;
+  camera_devices: CameraDevice[];
+  health: HealthStatus;
   capture_root: string;
+};
+
+export type ConfigPayload = {
+  pi: {
+    host: string | null;
+    user: string;
+    port: number;
+    remote_root: string;
+    ssh_key: string | null;
+    connect_timeout: number;
+  };
+  capture: {
+    count: number;
+    shutter_us: number;
+    gain: number;
+    awb: AwbMode;
+    awb_gains: [number, number] | null;
+    denoise: DenoiseMode;
+    quality: number;
+    width: number | null;
+    height: number | null;
+    metering: MeteringMode;
+    exposure: ExposureMode;
+    ev: number;
+    brightness: number;
+    contrast: number;
+    saturation: number;
+    sharpness: number;
+    tuning_file: string | null;
+    mode: string | null;
+    hdr: HdrMode;
+    nopreview: boolean;
+    immediate: boolean;
+    raw: boolean;
+  };
+  preview: {
+    width: number;
+    height: number;
+    framerate: number;
+    quality: number;
+    stream_timeout_s: number;
+  };
+  processing: ProcessingSettings;
 };
 
 export type SessionRecord = {
@@ -103,4 +209,27 @@ export type ProcessResponse = {
   enhanced_tif: string;
   report_json: string;
   contact_sheet: string;
+  quality_status: "pass" | "review" | "requires_recapture" | "unknown";
+  requires_recapture: boolean;
+  quality_flags: string[];
+};
+
+export type ProcessOptions = {
+  stack_method: "sigma" | "median" | "mean";
+  sigma: number;
+  min_frames: number;
+  max_working_edge: number | null;
+  dark_path: string;
+  flat_path: string;
+};
+
+export type WebRTCOfferPayload = {
+  sdp: string;
+  type: "offer";
+};
+
+export type WebRTCAnswerPayload = {
+  ok: boolean;
+  sdp: string;
+  type: "answer";
 };

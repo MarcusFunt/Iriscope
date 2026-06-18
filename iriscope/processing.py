@@ -59,9 +59,15 @@ def process_session(
         frames.append(image)
 
     frames = _crop_to_common_size(frames)
-    kept_indices, rejection_reasons = select_frames(frame_metrics, settings.min_frames)
+    kept_indices, quality_reasons = select_frames(frame_metrics, settings.min_frames)
     if not kept_indices:
         raise RuntimeError("All frames were rejected; inspect report data or lower quality thresholds.")
+    forced_keep_indices = sorted(index for index in kept_indices if str(index) in quality_reasons)
+    rejection_reasons = {
+        str(index): reason
+        for index, reason in quality_reasons.items()
+        if int(index) not in kept_indices
+    }
 
     kept_frames = [frames[index] for index in kept_indices]
     reference_local_index = max(
@@ -79,6 +85,16 @@ def process_session(
     stacked = stack_frames(aligned_frames, method=settings.stack_method, sigma=settings.sigma)
     iris_mask, mask_report = detect_iris_mask(stacked)
     enhanced = enhance_iris(stacked, iris_mask)
+    quality = assess_processing_quality(
+        frame_metrics=frame_metrics,
+        kept_indices=kept_indices,
+        stacked_local_indices=stacked_local_indices,
+        alignment_report=alignment_report,
+        mask_report=mask_report,
+        min_frames=settings.min_frames,
+        quality_reasons=quality_reasons,
+        forced_keep_indices=forced_keep_indices,
+    )
 
     stacked_tif = out / "stacked.tif"
     mask_png = out / "iris_mask.png"
@@ -106,6 +122,12 @@ def process_session(
         "frames": frame_metrics,
         "kept_indices": kept_indices,
         "stacked_input_indices": [kept_indices[index] for index in stacked_local_indices],
+        "quality_status": quality["quality_status"],
+        "requires_recapture": quality["requires_recapture"],
+        "quality_flags": quality["quality_flags"],
+        "quality_metrics": quality["quality_metrics"],
+        "quality_reasons": quality_reasons,
+        "forced_keep_indices": forced_keep_indices,
         "rejection_reasons": rejection_reasons,
         "reference_input": inputs[kept_indices[reference_local_index]].name,
         "alignment": alignment_report,
@@ -253,12 +275,92 @@ def select_frames(metrics: list[dict[str, Any]], min_frames: int = 3) -> tuple[l
             ),
         )
         kept = sorted(ranked[: min(min_frames, len(metrics))])
-        reasons = {
-            str(index): reason
-            for index, reason in reasons.items()
-            if int(index) not in kept
-        }
     return kept, reasons
+
+
+def assess_processing_quality(
+    frame_metrics: list[dict[str, Any]],
+    kept_indices: list[int],
+    stacked_local_indices: list[int],
+    alignment_report: list[dict[str, Any]],
+    mask_report: dict[str, Any],
+    min_frames: int,
+    quality_reasons: dict[str, str],
+    forced_keep_indices: list[int],
+) -> dict[str, Any]:
+    focus_values = [float(item.get("focus_score", 0.0)) for item in frame_metrics]
+    luma_values = [float(item.get("mean_luma", 0.0)) for item in frame_metrics]
+    clip_values = [float(item.get("clip_fraction", 0.0)) for item in frame_metrics]
+    alignment_scores = [
+        float(item.get("score", 0.0))
+        for item in alignment_report
+        if item.get("method") != "reference"
+    ]
+    focus_median = _median(focus_values) if focus_values else 0.0
+    luma_median = _median(luma_values) if luma_values else 0.0
+    clip_max = max(clip_values) if clip_values else 0.0
+    alignment_median = _median(alignment_scores) if alignment_scores else 1.0
+    radius = float(mask_report.get("radius") or 0.0)
+    pupil_radius = float(mask_report.get("pupil_radius") or 0.0)
+    pupil_to_iris_ratio = pupil_radius / radius if radius > 1e-12 else 0.0
+    mask_coverage = float(mask_report.get("coverage") or 0.0)
+
+    flags: list[str] = []
+    if len(frame_metrics) < min_frames:
+        flags.append("too_few_input_frames")
+    if len(kept_indices) < min_frames:
+        flags.append("too_few_kept_frames")
+    if len(stacked_local_indices) < min_frames:
+        flags.append("too_few_aligned_frames")
+    if forced_keep_indices:
+        flags.append("forced_keep_low_quality_frames")
+    if focus_median < 10.0:
+        flags.append("low_focus")
+    if luma_median < 0.02:
+        flags.append("underexposed")
+    if luma_median > 0.98:
+        flags.append("overexposed")
+    if clip_max > 0.20:
+        flags.append("heavy_clipping")
+    if alignment_median < 0.55:
+        flags.append("weak_alignment")
+    if not 0.06 <= mask_coverage <= 0.48:
+        flags.append("mask_coverage_out_of_range")
+    if not 0.18 <= pupil_to_iris_ratio <= 0.68:
+        flags.append("pupil_iris_ratio_out_of_range")
+
+    recapture_flags = {
+        "too_few_input_frames",
+        "too_few_kept_frames",
+        "too_few_aligned_frames",
+        "forced_keep_low_quality_frames",
+        "low_focus",
+        "underexposed",
+        "overexposed",
+        "heavy_clipping",
+        "weak_alignment",
+    }
+    requires_recapture = any(flag in recapture_flags for flag in flags)
+    if requires_recapture:
+        quality_status = "requires_recapture"
+    elif flags:
+        quality_status = "review"
+    else:
+        quality_status = "pass"
+    return {
+        "quality_status": quality_status,
+        "requires_recapture": requires_recapture,
+        "quality_flags": flags,
+        "quality_metrics": {
+            "focus_median": focus_median,
+            "mean_luma_median": luma_median,
+            "clip_fraction_max": clip_max,
+            "alignment_median": alignment_median,
+            "mask_coverage": mask_coverage,
+            "pupil_to_iris_ratio": pupil_to_iris_ratio,
+            "quality_reason_count": len(quality_reasons),
+        },
+    }
 
 
 def align_frames(frames: list[Any], reference) -> tuple[list[Any], list[dict[str, Any]]]:

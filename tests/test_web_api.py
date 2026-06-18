@@ -5,9 +5,13 @@ from iriscope.config import CaptureSettings, PreviewSettings
 def test_capture_dict_includes_command_preview():
     data = _capture_dict(CaptureSettings())
 
-    assert data["awb_gains"] == [1.8, 1.4]
+    assert data["awb"] == "auto"
+    assert data["awb_gains"] == [3.2, 1.4]
+    assert data["iso_equivalent"] == 0
     assert "rpicam-still" in data["command_preview"]
     assert "--raw" in data["command_preview"]
+    assert "--awb auto" in data["command_preview"]
+    assert "--awbgains" not in data["command_preview"]
 
 
 def test_preview_dict_includes_stream_command():

@@ -24,6 +24,10 @@ def test_process_session_with_synthetic_iris_stack(tmp_path: Path):
     report = json.loads(result.report_json.read_text(encoding="utf-8"))
     assert len(report["kept_indices"]) >= 3
     assert report["mask"]["coverage"] > 0.05
+    assert report["quality_status"] in {"pass", "review", "requires_recapture"}
+    assert isinstance(report["requires_recapture"], bool)
+    assert "quality_reasons" in report
+    assert "forced_keep_indices" in report
     assert report["outputs"]["enhanced_jpg"].endswith("enhanced.jpg")
 
 

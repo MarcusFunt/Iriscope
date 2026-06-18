@@ -35,13 +35,24 @@ class PiConfig:
 @dataclass(frozen=True)
 class CaptureSettings:
     count: int = 12
-    shutter_us: int = 8000
-    gain: float = 1.0
-    awb_gains: tuple[float, float] = (1.8, 1.4)
+    shutter_us: int = 0
+    gain: float = 0.0
+    awb: str = "auto"
+    awb_gains: tuple[float, float] | None = (3.2, 1.4)
     denoise: str = "off"
     quality: int = 95
     width: int | None = None
     height: int | None = None
+    metering: str = "centre"
+    exposure: str = "normal"
+    ev: float = 0.0
+    brightness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
+    sharpness: float = 1.0
+    tuning_file: str | None = None
+    mode: str | None = None
+    hdr: str = "off"
     nopreview: bool = True
     immediate: bool = True
     raw: bool = True
@@ -130,16 +141,29 @@ def _parse_pi(data: dict[str, Any]) -> PiConfig:
 
 
 def _parse_capture(data: dict[str, Any]) -> CaptureSettings:
-    awb = data.get("awb_gains", [1.8, 1.4])
+    awb_mode = str(data.get("awb", "manual" if "awb_gains" in data else "auto"))
+    awb_gains_value = data.get("awb_gains", [3.2, 1.4])
+    awb_gains = None if awb_gains_value in (None, "") else parse_awb_gains(awb_gains_value)
     return CaptureSettings(
         count=int(data.get("count", 12)),
-        shutter_us=int(data.get("shutter_us", 8000)),
-        gain=float(data.get("gain", 1.0)),
-        awb_gains=parse_awb_gains(awb),
+        shutter_us=int(data.get("shutter_us", 0)),
+        gain=float(data.get("gain", 0.0)),
+        awb=awb_mode,
+        awb_gains=awb_gains,
         denoise=str(data.get("denoise", "off")),
         quality=int(data.get("quality", 95)),
         width=_optional_int(data.get("width")),
         height=_optional_int(data.get("height")),
+        metering=str(data.get("metering", "centre")),
+        exposure=str(data.get("exposure", "normal")),
+        ev=float(data.get("ev", 0.0)),
+        brightness=float(data.get("brightness", 0.0)),
+        contrast=float(data.get("contrast", 1.0)),
+        saturation=float(data.get("saturation", 1.0)),
+        sharpness=float(data.get("sharpness", 1.0)),
+        tuning_file=_optional_str(data.get("tuning_file")),
+        mode=_optional_str(data.get("mode")),
+        hdr=str(data.get("hdr", "off")),
         nopreview=bool(data.get("nopreview", True)),
         immediate=bool(data.get("immediate", True)),
         raw=bool(data.get("raw", True)),
@@ -170,3 +194,10 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    return clean or None
