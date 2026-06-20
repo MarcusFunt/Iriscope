@@ -27,6 +27,8 @@ analysis-runs/
 
 # Local machine config may contain hostnames or usernames.
 .iriscope.toml
+.env
+.docker/
 
 # Frontend dependencies and build output.
 web/node_modules/

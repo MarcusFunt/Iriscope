@@ -1,0 +1,9 @@
+services:
+  iriscope-host:
+    volumes:
+      - type: bind
+        source: ${IRISCOPE_SSH_KEY_HOST_PATH}
+        target: ${IRISCOPE_SSH_KEY_CONTAINER_PATH:-/run/secrets/iriscope_ssh_key}
+        read_only: true
+        bind:
+          create_host_path: false

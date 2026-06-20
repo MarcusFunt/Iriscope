@@ -35,6 +35,19 @@ def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypa
     assert config_payload["config"]["processing"]["quality"]["max_clip_fraction"] == 0.2
 
 
+def test_serves_built_web_dist_when_available(tmp_path: Path, monkeypatch):
+    web_dist = tmp_path / "web-dist"
+    web_dist.mkdir()
+    (web_dist / "index.html").write_text("<!doctype html><title>Iriscope Docker</title>", encoding="utf-8")
+    monkeypatch.setattr(web_api, "WEB_DIST", web_dist)
+
+    client = TestClient(web_api.create_app())
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Iriscope Docker" in response.text
+
+
 def test_sessions_expose_outputs_and_artifact_endpoints_are_bounded(tmp_path: Path, monkeypatch):
     client, captures = _client(tmp_path, monkeypatch)
     session = _processed_session(captures)

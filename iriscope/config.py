@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -109,17 +110,18 @@ class ProjectConfig:
 def load_config(path: str | Path | None = None) -> ProjectConfig:
     config_path = Path(path) if path else DEFAULT_CONFIG_PATH
     if not config_path.exists():
-        return ProjectConfig()
+        return _apply_env_overrides(ProjectConfig())
     if tomllib is None:
         raise RuntimeError("TOML config files require Python 3.11+ or the `tomli` package.")
     with config_path.open("rb") as handle:
         data = tomllib.load(handle)
-    return ProjectConfig(
+    config = ProjectConfig(
         pi=_parse_pi(data.get("pi", {})),
         capture=_parse_capture(data.get("capture", {})),
         preview=_parse_preview(data.get("preview", {})),
         processing=_parse_processing(data.get("processing", {})),
     )
+    return _apply_env_overrides(config)
 
 
 def merge_pi(config: PiConfig, **overrides: Any) -> PiConfig:
@@ -160,6 +162,34 @@ def _parse_pi(data: dict[str, Any]) -> PiConfig:
         ssh_key=data.get("ssh_key"),
         connect_timeout=int(data.get("connect_timeout", 15)),
     )
+
+
+def _apply_env_overrides(config: ProjectConfig) -> ProjectConfig:
+    pi_overrides: dict[str, Any] = {}
+    env_map = {
+        "IRISCOPE_PI_HOST": ("host", str),
+        "IRISCOPE_PI_USER": ("user", str),
+        "IRISCOPE_PI_REMOTE_ROOT": ("remote_root", str),
+        "IRISCOPE_PI_SSH_KEY": ("ssh_key", str),
+        "IRISCOPE_PI_PORT": ("port", int),
+        "IRISCOPE_PI_CONNECT_TIMEOUT": ("connect_timeout", int),
+    }
+    for env_name, (field_name, parser) in env_map.items():
+        if env_name not in os.environ:
+            continue
+        raw_value = os.environ[env_name].strip()
+        if not raw_value:
+            if field_name in {"host", "ssh_key"}:
+                pi_overrides[field_name] = None
+            continue
+        value = parser(raw_value)
+        if value is not None:
+            pi_overrides[field_name] = value
+        elif field_name in {"host", "ssh_key"}:
+            pi_overrides[field_name] = None
+    if not pi_overrides:
+        return config
+    return replace(config, pi=replace(config.pi, **pi_overrides))
 
 
 def _parse_capture(data: dict[str, Any]) -> CaptureSettings:

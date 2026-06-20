@@ -137,7 +137,7 @@ def capture_remote_calibration(pi: PiConfig, settings: CaptureSettings) -> str:
 def pull_remote_session(pi: PiConfig, remote_dir: str, local_parent: Path) -> Path:
     local_parent.mkdir(parents=True, exist_ok=True)
     destination = local_parent / Path(remote_dir).name
-    args = ["scp", "-P", str(pi.port)]
+    args = ["scp", "-P", str(pi.port), "-o", "StrictHostKeyChecking=accept-new"]
     if pi.ssh_key:
         args += ["-i", pi.ssh_key]
     args += ["-r", f"{pi.target}:{remote_dir}", str(local_parent)]
@@ -146,7 +146,15 @@ def pull_remote_session(pi: PiConfig, remote_dir: str, local_parent: Path) -> Pa
 
 
 def run_ssh(pi: PiConfig, remote_command: str) -> subprocess.CompletedProcess[str]:
-    args = ["ssh", "-p", str(pi.port), "-o", f"ConnectTimeout={pi.connect_timeout}"]
+    args = [
+        "ssh",
+        "-p",
+        str(pi.port),
+        "-o",
+        f"ConnectTimeout={pi.connect_timeout}",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
     if pi.ssh_key:
         args += ["-i", pi.ssh_key]
     args += [pi.target, remote_command]

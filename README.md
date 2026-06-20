@@ -124,6 +124,63 @@ npm run dev -- --port 5173
 
 Open `http://127.0.0.1:5173`.
 
+## Docker Host Runtime
+
+The host GUI/API can also run as one Docker container. The image builds the Vite frontend into static files and serves it from the FastAPI process on port `8765`.
+
+Create a Docker environment file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` for your Pi. If `Iriscope.local` does not resolve inside Docker, use the Pi IP address instead. To use SSH from the container, set `IRISCOPE_SSH_KEY_HOST_PATH` to the host key path and keep `IRISCOPE_PI_SSH_KEY=/run/secrets/iriscope_ssh_key`.
+
+Run without an SSH key mount:
+
+```powershell
+docker compose up -d --build
+```
+
+Run with the SSH key mount enabled:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.ssh.yml up -d --build
+```
+
+Open `http://127.0.0.1:8765`. Captures are persisted under the local `captures/` folder, and `.iriscope.toml` is mounted as the container config file. Docker binds to `127.0.0.1` by default; set `IRISCOPE_BIND_ADDRESS` and `IRISCOPE_ADMIN_TOKEN` before exposing it on a shared network. Docker-specific environment variables such as `IRISCOPE_PI_HOST`, `IRISCOPE_PI_USER`, and `IRISCOPE_PI_SSH_KEY` override the mounted TOML at runtime.
+
+To stop the container:
+
+```powershell
+docker compose down
+```
+
+## Docker Watchdog
+
+The Docker watchdog keeps a deployed checkout aligned with GitHub. It compares the local `HEAD` with `origin/main`; when GitHub is newer, it runs `git fetch`, resets the checkout to `origin/main`, cleans untracked files, and rebuilds/restarts `iriscope-host`.
+
+Run one check:
+
+```powershell
+.\scripts\iriscope-docker-watchdog.ps1 -Once
+```
+
+Run continuously:
+
+```powershell
+.\scripts\iriscope-docker-watchdog.ps1
+```
+
+For Bash environments:
+
+```bash
+scripts/iriscope-docker-watchdog.sh --once
+scripts/iriscope-docker-watchdog.sh
+```
+
+The watchdog intentionally discards local edits in the deployed checkout so it matches GitHub. Use a separate development checkout for uncommitted work.
+
 The GUI provides:
 
 - local device/dependency status, including COM port, UVC camera, SSH config, and Python dependencies

@@ -43,6 +43,7 @@ try:
     from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+    from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
 except ModuleNotFoundError as exc:  # pragma: no cover - import-time guidance
     raise RuntimeError("The web API requires `pip install -e .[web]`.") from exc
@@ -50,8 +51,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import-time guidance
 
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(os.environ.get("IRISCOPE_PROJECT_ROOT", DEFAULT_PROJECT_ROOT)).expanduser().resolve()
-CONFIG_PATH = PROJECT_ROOT / ".iriscope.toml"
+CONFIG_PATH = Path(os.environ.get("IRISCOPE_CONFIG_PATH", PROJECT_ROOT / ".iriscope.toml")).expanduser().resolve()
 CAPTURES_ROOT = Path(os.environ.get("IRISCOPE_CAPTURES_ROOT", PROJECT_ROOT / "captures")).expanduser().resolve()
+WEB_DIST = Path(os.environ.get("IRISCOPE_WEB_DIST", PROJECT_ROOT / "web" / "dist")).expanduser().resolve()
 ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | {".json", ".html", ".csv", ".txt"}
 MJPEG_BOUNDARY = "iriscope-frame"
 _PREVIEW_LOCK = threading.Lock()
@@ -483,7 +485,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return HTMLResponse(text)
 
+    _mount_web_dist(app)
     return app
+
+
+def _mount_web_dist(app: FastAPI) -> None:
+    if (WEB_DIST / "index.html").exists():
+        app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+
 
 def _run_calibration(config) -> tuple[str, str]:
     camera_list = verify_remote_camera(config.pi)
@@ -655,6 +664,8 @@ def _ssh_args(pi: PiConfig, tty: bool = True) -> list[str]:
         str(pi.port),
         "-o",
         f"ConnectTimeout={min(int(pi.connect_timeout), 6)}",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
         "-o",
         "BatchMode=yes",
     ]
@@ -1314,6 +1325,8 @@ def _preview_ssh_args(pi: PiConfig) -> list[str]:
         "-o",
         f"ConnectTimeout={pi.connect_timeout}",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         "BatchMode=yes",
         "-o",
         "ServerAliveInterval=5",
@@ -1507,6 +1520,8 @@ def _run_ssh_batch(pi, remote_command: str) -> subprocess.CompletedProcess[bytes
         "-o",
         f"ConnectTimeout={pi.connect_timeout}",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         "BatchMode=yes",
     ]
     if pi.ssh_key:
@@ -1531,7 +1546,7 @@ def _run_ssh_batch(pi, remote_command: str) -> subprocess.CompletedProcess[bytes
 
 
 def _scp_from_pi(pi, remote_path: str, local_path: Path) -> None:
-    args = ["scp", "-P", str(pi.port), "-o", "BatchMode=yes"]
+    args = ["scp", "-P", str(pi.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
     if pi.ssh_key:
         args += ["-i", pi.ssh_key]
     args += [f"{pi.target}:{remote_path}", str(local_path)]

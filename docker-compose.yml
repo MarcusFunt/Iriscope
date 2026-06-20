@@ -1,0 +1,24 @@
+services:
+  iriscope-host:
+    build:
+      context: .
+    image: iriscope-host:local
+    container_name: iriscope-host
+    restart: unless-stopped
+    ports:
+      - "${IRISCOPE_BIND_ADDRESS:-127.0.0.1}:${IRISCOPE_HOST_PORT:-8765}:8765"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      IRISCOPE_PROJECT_ROOT: /app
+      IRISCOPE_CONFIG_PATH: /config/.iriscope.toml
+      IRISCOPE_CAPTURES_ROOT: /data/captures
+      IRISCOPE_WEB_DIST: /app/web/dist
+    volumes:
+      - ./captures:/data/captures
+      - type: bind
+        source: ./.iriscope.toml
+        target: /config/.iriscope.toml
+        bind:
+          create_host_path: false

@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+captures
+datasets
+web/node_modules
+web/dist
+*.egg-info
+.iriscope.toml
+.env
