@@ -66,6 +66,7 @@ type CaptureForm = {
 };
 
 type LogItem = {
+  id: string;
   time: string;
   level: "info" | "ok" | "warn" | "error";
   message: string;
@@ -78,6 +79,12 @@ type ProcessedOutputState = {
 
 type PreviewMode = "webrtc" | "stream" | "snapshot";
 type ActiveView = "capture" | "preprocess" | "label" | "review" | "settings";
+type SharpnessTone = "measuring" | "soft" | "ok" | "sharp" | "unavailable";
+
+type SharpnessReading = {
+  score: number | null;
+  tone: SharpnessTone;
+};
 
 const defaultCapture: CaptureForm = {
   subject: "S001",
@@ -155,6 +162,8 @@ const defaultProcessOptions: ProcessOptions = {
   flat_path: "",
 };
 
+let logSequence = 0;
+
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>("capture");
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -170,7 +179,7 @@ export default function App() {
   const [preprocess, setPreprocess] = useState<PreprocessReport | null>(null);
   const [processedOutput, setProcessedOutput] = useState<ProcessedOutputState | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([
-    { time: now(), level: "info", message: "Iriscope host interface ready." },
+    { id: logId(), time: now(), level: "info", message: "Iriscope host interface ready." },
   ]);
   const [busy, setBusy] = useState<string | null>(null);
   const [snapshotNonce, setSnapshotNonce] = useState(Date.now());
@@ -179,7 +188,7 @@ export default function App() {
   const [livePreviewReady, setLivePreviewReady] = useState(false);
 
   const appendLog = useCallback((level: LogItem["level"], message: string) => {
-    setLogs((items) => [{ time: now(), level, message }, ...items].slice(0, 80));
+    setLogs((items) => [{ id: logId(), time: now(), level, message }, ...items].slice(0, 80));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -252,6 +261,7 @@ export default function App() {
   const piReady = Boolean(displayStatus?.health?.ssh?.ok && displayStatus?.health?.rpicam?.ok);
   const previewLabel = piConfigured ? "Pi HQ camera" : cameraName;
   const previewSourceKey = piConfigured ? `pi:${displayStatus?.config.pi_host ?? ""}` : `uvc:${cameraName}`;
+  const liveSharpnessThreshold = displayStatus?.config.processing.quality.min_median_focus ?? 10;
   const previewSrc = snapshotFailed
     || !displayStatus
     ? "/iris-placeholder.png"
@@ -360,6 +370,7 @@ export default function App() {
                 snapshotFailed={snapshotFailed}
                 piConfigured={piConfigured}
                 nonce={snapshotNonce}
+                sharpnessThreshold={liveSharpnessThreshold}
                 onStreamFallback={handleStreamFallback}
                 onWebRTCFallback={handleWebRTCFallback}
                 onPreviewFailed={handlePreviewFailed}
@@ -628,6 +639,7 @@ function PreviewPanel({
   snapshotFailed,
   piConfigured,
   nonce,
+  sharpnessThreshold,
   onStreamFallback,
   onWebRTCFallback,
   onPreviewFailed,
@@ -641,6 +653,7 @@ function PreviewPanel({
   snapshotFailed: boolean;
   piConfigured: boolean;
   nonce: number;
+  sharpnessThreshold: number;
   onStreamFallback: () => void;
   onWebRTCFallback: (message: string) => void;
   onPreviewFailed: () => void;
@@ -648,7 +661,16 @@ function PreviewPanel({
   onRefreshPreview: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
   const [webrtcReady, setWebrtcReady] = useState(false);
+  const sharpness = useLiveSharpness({
+    imageRef,
+    videoRef,
+    enabled: !snapshotFailed,
+    mode: previewMode,
+    nonce,
+    threshold: sharpnessThreshold,
+  });
 
   useEffect(() => {
     setWebrtcReady(false);
@@ -761,6 +783,7 @@ function PreviewPanel({
           <video ref={videoRef} aria-label="Live camera preview" autoPlay muted playsInline />
         ) : (
           <img
+            ref={imageRef}
             src={previewSrc}
             alt="Live camera preview"
             onError={() => {
@@ -775,6 +798,7 @@ function PreviewPanel({
         <button className="icon-button preview-refresh" title="Refresh preview" onClick={onRefreshPreview}>
           <RefreshCw size={17} />
         </button>
+        <LiveSharpnessIndicator reading={sharpness} threshold={sharpnessThreshold} />
       </div>
       {previewMode === "webrtc" && !snapshotFailed ? (
         <p className={webrtcReady ? "preview-message ok" : "preview-message"}>
@@ -789,6 +813,168 @@ function PreviewPanel({
       <QualityStrip preprocess={preprocess} />
     </div>
   );
+}
+
+function useLiveSharpness({
+  imageRef,
+  videoRef,
+  enabled,
+  mode,
+  nonce,
+  threshold,
+}: {
+  imageRef: React.RefObject<HTMLImageElement | null>;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  enabled: boolean;
+  mode: PreviewMode;
+  nonce: number;
+  threshold: number;
+}) {
+  const [reading, setReading] = useState<SharpnessReading>({ score: null, tone: "measuring" });
+
+  useEffect(() => {
+    if (!enabled) {
+      setReading({ score: null, tone: "unavailable" });
+      return undefined;
+    }
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      setReading({ score: null, tone: "unavailable" });
+      return undefined;
+    }
+
+    const sample = () => {
+      const source = currentPreviewSource(mode, videoRef.current, imageRef.current);
+      if (!source) {
+        setReading({ score: null, tone: "measuring" });
+        return;
+      }
+
+      try {
+        const dimensions = previewSourceDimensions(source);
+        if (!dimensions) {
+          setReading({ score: null, tone: "measuring" });
+          return;
+        }
+        const maxEdge = 320;
+        const scale = Math.min(1, maxEdge / Math.max(dimensions.width, dimensions.height));
+        canvas.width = Math.max(1, Math.round(dimensions.width * scale));
+        canvas.height = Math.max(1, Math.round(dimensions.height * scale));
+        context.drawImage(source, 0, 0, canvas.width, canvas.height);
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+        const score = laplacianVariance(imageData.data, canvas.width, canvas.height);
+        setReading({ score, tone: sharpnessTone(score, threshold) });
+      } catch {
+        setReading({ score: null, tone: "unavailable" });
+      }
+    };
+
+    setReading({ score: null, tone: "measuring" });
+    sample();
+    const interval = window.setInterval(sample, mode === "snapshot" ? 2000 : 750);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [enabled, imageRef, mode, nonce, threshold, videoRef]);
+
+  return reading;
+}
+
+function LiveSharpnessIndicator({ reading, threshold }: { reading: SharpnessReading; threshold: number }) {
+  const scoreLabel = reading.score === null ? "--" : formatSharpnessScore(reading.score);
+  const meterWidth = reading.score === null ? 0 : Math.min(100, (reading.score / Math.max(threshold * 3, 1)) * 100);
+
+  return (
+    <div className={`sharpness-indicator ${reading.tone}`} aria-label={`Sharpness ${scoreLabel}`}>
+      <div className="sharpness-readout">
+        <span>Sharpness</span>
+        <strong>{scoreLabel}</strong>
+      </div>
+      <span className="sharpness-status">{sharpnessLabel(reading.tone)}</span>
+      <div className="sharpness-meter" aria-hidden="true">
+        <span style={{ width: `${meterWidth}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function currentPreviewSource(
+  mode: PreviewMode,
+  video: HTMLVideoElement | null,
+  image: HTMLImageElement | null,
+): HTMLVideoElement | HTMLImageElement | null {
+  if (mode === "webrtc") {
+    return video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 ? video : null;
+  }
+  return image && image.complete && image.naturalWidth > 0 ? image : null;
+}
+
+function previewSourceDimensions(source: HTMLVideoElement | HTMLImageElement) {
+  if (source instanceof HTMLVideoElement) {
+    return source.videoWidth && source.videoHeight ? { width: source.videoWidth, height: source.videoHeight } : null;
+  }
+  return source.naturalWidth && source.naturalHeight ? { width: source.naturalWidth, height: source.naturalHeight } : null;
+}
+
+function laplacianVariance(data: Uint8ClampedArray, width: number, height: number) {
+  if (width < 3 || height < 3) {
+    return 0;
+  }
+
+  const gray = new Float32Array(width * height);
+  for (let pixel = 0, grayIndex = 0; pixel < data.length; pixel += 4, grayIndex += 1) {
+    gray[grayIndex] = data[pixel] * 0.299 + data[pixel + 1] * 0.587 + data[pixel + 2] * 0.114;
+  }
+
+  let count = 0;
+  let sum = 0;
+  let sumSquares = 0;
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = y * width + x;
+      const laplacian = gray[index - width] + gray[index - 1] - 4 * gray[index] + gray[index + 1] + gray[index + width];
+      sum += laplacian;
+      sumSquares += laplacian * laplacian;
+      count += 1;
+    }
+  }
+
+  const mean = sum / count;
+  return Math.max(0, sumSquares / count - mean * mean);
+}
+
+function sharpnessTone(score: number, threshold: number): SharpnessTone {
+  const minimum = Math.max(threshold, 1);
+  if (score < minimum) {
+    return "soft";
+  }
+  if (score < minimum * 2.5) {
+    return "ok";
+  }
+  return "sharp";
+}
+
+function sharpnessLabel(tone: SharpnessTone) {
+  if (tone === "sharp") {
+    return "crisp";
+  }
+  if (tone === "ok") {
+    return "ready";
+  }
+  if (tone === "soft") {
+    return "soft";
+  }
+  if (tone === "unavailable") {
+    return "unavailable";
+  }
+  return "measuring";
+}
+
+function formatSharpnessScore(score: number) {
+  return score >= 100 ? String(Math.round(score)) : score.toFixed(1);
 }
 
 function waitForIceGatheringComplete(pc: RTCPeerConnection, timeoutMs = 5000) {
@@ -1530,7 +1716,7 @@ function LogPanel({ logs }: { logs: LogItem[] }) {
       <PanelTitle icon={<Terminal size={18} />} title="Run Log" />
       <div className="logs">
         {logs.map((item) => (
-          <div className={`log-line ${item.level}`} key={`${item.time}-${item.message}`}>
+          <div className={`log-line ${item.level}`} key={item.id}>
             <span>{item.time}</span>
             <p>{item.message}</p>
           </div>
@@ -1570,6 +1756,11 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function now() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function logId() {
+  logSequence += 1;
+  return `${Date.now()}-${logSequence}`;
 }
 
 function errorMessage(error: unknown) {

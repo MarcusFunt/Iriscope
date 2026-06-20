@@ -271,6 +271,102 @@ nav {
   right: 10px;
 }
 
+.sharpness-indicator {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: min(214px, calc(100% - 20px));
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px 10px;
+  align-items: end;
+  border: 1px solid rgba(121, 134, 136, 0.46);
+  border-radius: 8px;
+  background: rgba(12, 16, 18, 0.82);
+  color: #e9f2f0;
+  padding: 9px 10px;
+  backdrop-filter: blur(10px);
+}
+
+.sharpness-readout span,
+.sharpness-status {
+  display: block;
+  color: #a9b5b5;
+  font-size: 10px;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.sharpness-readout strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.sharpness-status {
+  color: #cbd4d2;
+  text-align: right;
+}
+
+.sharpness-meter {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #263034;
+}
+
+.sharpness-meter span {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: #72d8c5;
+  transition: width 180ms ease;
+}
+
+.sharpness-indicator.measuring .sharpness-meter span,
+.sharpness-indicator.unavailable .sharpness-meter span {
+  min-width: 0;
+}
+
+.sharpness-indicator.soft {
+  border-color: rgba(238, 124, 104, 0.72);
+}
+
+.sharpness-indicator.soft .sharpness-status {
+  color: #f1a08e;
+}
+
+.sharpness-indicator.soft .sharpness-meter span {
+  background: #ee7c68;
+}
+
+.sharpness-indicator.ok {
+  border-color: rgba(242, 199, 125, 0.72);
+}
+
+.sharpness-indicator.ok .sharpness-status {
+  color: #f2c77d;
+}
+
+.sharpness-indicator.ok .sharpness-meter span {
+  background: #f2c77d;
+}
+
+.sharpness-indicator.sharp {
+  border-color: rgba(114, 216, 197, 0.72);
+}
+
+.sharpness-indicator.sharp .sharpness-status {
+  color: #9debd5;
+}
+
+.sharpness-indicator.sharp .sharpness-meter span {
+  background: #72d8c5;
+}
+
 .icon-button {
   width: 34px;
   height: 34px;

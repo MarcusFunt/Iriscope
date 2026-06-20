@@ -250,6 +250,8 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.getByText("Pi HQ camera")).toBeVisible();
   await expect.poll(() => piWebrtcRequested).toBe(true);
   await expect.poll(() => piStreamRequested).toBe(true);
+  await expect(page.getByText("Sharpness")).toBeVisible();
+  await expect(page.locator(".sharpness-indicator")).toHaveAttribute("aria-label", /Sharpness 0\.0/);
   await expect(page.getByLabel("Frames")).toHaveValue("16");
   await expect(page.getByLabel("Shutter us")).toHaveValue("0");
   await expect(page.getByRole("spinbutton", { name: "Gain" })).toHaveValue("0");
