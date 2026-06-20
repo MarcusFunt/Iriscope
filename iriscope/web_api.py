@@ -32,6 +32,7 @@ from .config import (
     PreviewSettings,
     ProcessingSettings,
     ProjectConfig,
+    QualityThresholds,
     load_config,
     merge_capture,
 )
@@ -39,9 +40,9 @@ from .labeling import inspect_preprocessing, load_label, save_label
 from .processing import IMAGE_SUFFIXES, find_input_images, process_session
 
 try:
-    from fastapi import FastAPI, HTTPException, Query
+    from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
     from pydantic import BaseModel, Field
 except ModuleNotFoundError as exc:  # pragma: no cover - import-time guidance
     raise RuntimeError("The web API requires `pip install -e .[web]`.") from exc
@@ -89,6 +90,7 @@ class ProcessRequest(BaseModel):
     max_working_edge: int | None = Field(default=None, ge=64)
     dark_path: str | None = None
     flat_path: str | None = None
+    save_intermediates: bool | None = None
 
 
 class LabelRequest(BaseModel):
@@ -133,7 +135,7 @@ class CaptureConfigRequest(BaseModel):
     gain: float = Field(default=0.0, ge=0.0)
     awb: AwbMode = "auto"
     awb_gains: list[float] | None = Field(default_factory=lambda: [3.2, 1.4], min_length=2, max_length=2)
-    denoise: Literal["auto", "off", "cdn_off", "cdn_fast", "cdn_hq"] = "off"
+    denoise: Literal["auto", "off", "cdn_off", "cdn_fast", "cdn_hq"] = "cdn_fast"
     quality: int = Field(default=95, ge=1, le=100)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
@@ -160,12 +162,33 @@ class PreviewConfigRequest(BaseModel):
     stream_timeout_s: int = Field(default=0, ge=0, le=3600)
 
 
+class QualityThresholdsRequest(BaseModel):
+    max_clip_fraction: float = Field(default=0.20, ge=0.0, le=1.0)
+    min_relative_focus: float = Field(default=0.35, ge=0.0)
+    min_median_focus: float = Field(default=10.0, ge=0.0)
+    min_mean_luma: float = Field(default=0.02, ge=0.0, le=1.0)
+    max_mean_luma: float = Field(default=0.98, ge=0.0, le=1.0)
+    min_alignment_score: float = Field(default=0.55, ge=0.0)
+    max_eval_clip_fraction: float = Field(default=0.35, ge=0.0, le=1.0)
+    min_mask_coverage: float = Field(default=0.06, ge=0.0, le=1.0)
+    max_mask_coverage: float = Field(default=0.48, ge=0.0, le=1.0)
+    min_pupil_iris_ratio: float = Field(default=0.18, ge=0.0)
+    max_pupil_iris_ratio: float = Field(default=0.68, ge=0.0)
+    min_iris_radius_fraction: float = Field(default=0.16, ge=0.0)
+    max_iris_radius_fraction: float = Field(default=0.55, ge=0.0)
+    max_center_offset_fraction: float = Field(default=0.28, ge=0.0)
+    max_edge_gain: float = Field(default=7.0, ge=0.0)
+    max_edge_gain_with_contrast: float = Field(default=5.5, ge=0.0)
+    max_contrast_gain_for_edge: float = Field(default=3.0, ge=0.0)
+
+
 class ProcessingConfigRequest(BaseModel):
     stack_method: Literal["sigma", "median", "mean"] = "sigma"
     sigma: float = Field(default=2.5, ge=0.1)
     min_frames: int = Field(default=3, ge=1)
     save_intermediates: bool = True
     max_working_edge: int | None = Field(default=None, ge=64)
+    quality: QualityThresholdsRequest = Field(default_factory=QualityThresholdsRequest)
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -179,16 +202,26 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Iriscope Host API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-        ],
+        allow_origins=_allowed_origins(),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def enforce_local_or_token(request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        host = request.headers.get("host", "").split(":", 1)[0].strip("[]").lower()
+        if _is_loopback_host(host):
+            return await call_next(request)
+        token = os.environ.get("IRISCOPE_ADMIN_TOKEN", "")
+        if token and _request_token(request) == token:
+            return await call_next(request)
+        return JSONResponse(
+            {"detail": "Remote Iriscope API access requires IRISCOPE_ADMIN_TOKEN."},
+            status_code=403,
+        )
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
@@ -200,25 +233,18 @@ def create_app() -> FastAPI:
                 "release": platform.release(),
                 "python": platform.python_version(),
             },
-            "config": {
-                "exists": CONFIG_PATH.exists(),
-                "path": str(CONFIG_PATH),
-                "pi_host": config.pi.host,
-                "pi_user": config.pi.user,
-                "pi_port": config.pi.port,
-                "remote_root": config.pi.remote_root,
-                "ssh_key": config.pi.ssh_key,
-                "connect_timeout": config.pi.connect_timeout,
-                "capture": _capture_dict(config.capture),
-                "preview": _preview_dict(config.capture, config.preview),
-                "processing": asdict(config.processing),
-            },
+            "config": _status_config_dict(config),
             "tools": _tool_status(),
             "serial_ports": _serial_ports(),
             "camera_devices": _camera_devices(),
             "health": health,
             "capture_root": str(CAPTURES_ROOT),
         }
+
+    @app.get("/api/config")
+    async def get_config() -> dict[str, Any]:
+        config = load_config(CONFIG_PATH)
+        return {"ok": True, "path": str(CONFIG_PATH), "config": _config_payload(config)}
 
     @app.post("/api/config")
     async def save_config(request: ConfigUpdateRequest) -> dict[str, Any]:
@@ -230,12 +256,7 @@ def create_app() -> FastAPI:
         return {
             "ok": True,
             "path": str(CONFIG_PATH),
-            "config": {
-                "pi": asdict(config.pi),
-                "capture": _capture_dict(config.capture),
-                "preview": _preview_dict(config.capture, config.preview),
-                "processing": asdict(config.processing),
-            },
+            "config": _config_payload(config),
         }
 
     @app.get("/api/sessions")
@@ -356,14 +377,20 @@ def create_app() -> FastAPI:
 
     @app.post("/api/process")
     async def process(request: ProcessRequest) -> dict[str, Any]:
+        config = load_config(CONFIG_PATH)
         settings = ProcessingSettings(
             stack_method=request.stack_method,
             sigma=request.sigma,
             min_frames=request.min_frames,
             max_working_edge=request.max_working_edge,
-            save_intermediates=True,
+            save_intermediates=(
+                request.save_intermediates
+                if request.save_intermediates is not None
+                else config.processing.save_intermediates
+            ),
+            quality=config.processing.quality,
         )
-        session_dir = _resolve_local_path(request.session_dir)
+        session_dir = _resolve_session_path(request.session_dir)
         try:
             dark_path = _resolve_optional_image_path(request.dark_path)
             flat_path = _resolve_optional_image_path(request.flat_path)
@@ -392,16 +419,22 @@ def create_app() -> FastAPI:
 
     @app.post("/api/preprocess")
     async def preprocess(request: PreprocessRequest) -> dict[str, Any]:
-        session_dir = _resolve_local_path(request.session_dir)
+        config = load_config(CONFIG_PATH)
+        session_dir = _resolve_session_path(request.session_dir)
         try:
-            report = await asyncio.to_thread(inspect_preprocessing, session_dir, request.max_frames)
+            report = await asyncio.to_thread(
+                inspect_preprocessing,
+                session_dir,
+                request.max_frames,
+                config.processing.quality,
+            )
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True, "report": report}
 
     @app.get("/api/label")
     async def label(session_dir: str) -> dict[str, Any]:
-        root = _resolve_local_path(session_dir)
+        root = _resolve_session_path(session_dir)
         try:
             record = await asyncio.to_thread(load_label, root)
         except Exception as exc:
@@ -410,7 +443,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/label")
     async def save_session_label(request: LabelRequest) -> dict[str, Any]:
-        root = _resolve_local_path(request.session_dir)
+        root = _resolve_session_path(request.session_dir)
         data = _model_data(request)
         data.pop("session_dir", None)
         try:
@@ -432,7 +465,7 @@ def create_app() -> FastAPI:
     async def review(session_dir: str) -> HTMLResponse:
         from .review import generate_review, resolve_processed_dir
 
-        root = _resolve_local_path(session_dir)
+        root = _resolve_session_path(session_dir)
         try:
             html_path = await asyncio.to_thread(generate_review, root, False)
             processed = resolve_processed_dir(root)
@@ -451,10 +484,6 @@ def create_app() -> FastAPI:
         return HTMLResponse(text)
 
     return app
-
-
-app = create_app()
-
 
 def _run_calibration(config) -> tuple[str, str]:
     camera_list = verify_remote_camera(config.pi)
@@ -756,8 +785,34 @@ def _config_from_request(request: ConfigUpdateRequest) -> ProjectConfig:
             min_frames=processing.min_frames,
             save_intermediates=processing.save_intermediates,
             max_working_edge=processing.max_working_edge,
+            quality=QualityThresholds(**_model_data(processing.quality)),
         ),
     )
+
+
+def _status_config_dict(config: ProjectConfig) -> dict[str, Any]:
+    return {
+        "exists": CONFIG_PATH.exists(),
+        "path": str(CONFIG_PATH),
+        "pi_host": config.pi.host,
+        "pi_user": config.pi.user,
+        "pi_port": config.pi.port,
+        "remote_root": config.pi.remote_root,
+        "ssh_key_configured": bool(config.pi.ssh_key),
+        "connect_timeout": config.pi.connect_timeout,
+        "capture": _capture_dict(config.capture),
+        "preview": _preview_dict(config.capture, config.preview),
+        "processing": asdict(config.processing),
+    }
+
+
+def _config_payload(config: ProjectConfig) -> dict[str, Any]:
+    return {
+        "pi": asdict(config.pi),
+        "capture": _capture_dict(config.capture),
+        "preview": _preview_dict(config.capture, config.preview),
+        "processing": asdict(config.processing),
+    }
 
 
 def _write_project_config(path: Path, config: ProjectConfig) -> None:
@@ -825,6 +880,28 @@ def _write_project_config(path: Path, config: ProjectConfig) -> None:
     ]
     if config.processing.max_working_edge is not None:
         lines.append(f"max_working_edge = {config.processing.max_working_edge}")
+    quality = config.processing.quality
+    lines += [
+        "",
+        "[processing.quality]",
+        f"max_clip_fraction = {_float(quality.max_clip_fraction)}",
+        f"min_relative_focus = {_float(quality.min_relative_focus)}",
+        f"min_median_focus = {_float(quality.min_median_focus)}",
+        f"min_mean_luma = {_float(quality.min_mean_luma)}",
+        f"max_mean_luma = {_float(quality.max_mean_luma)}",
+        f"min_alignment_score = {_float(quality.min_alignment_score)}",
+        f"max_eval_clip_fraction = {_float(quality.max_eval_clip_fraction)}",
+        f"min_mask_coverage = {_float(quality.min_mask_coverage)}",
+        f"max_mask_coverage = {_float(quality.max_mask_coverage)}",
+        f"min_pupil_iris_ratio = {_float(quality.min_pupil_iris_ratio)}",
+        f"max_pupil_iris_ratio = {_float(quality.max_pupil_iris_ratio)}",
+        f"min_iris_radius_fraction = {_float(quality.min_iris_radius_fraction)}",
+        f"max_iris_radius_fraction = {_float(quality.max_iris_radius_fraction)}",
+        f"max_center_offset_fraction = {_float(quality.max_center_offset_fraction)}",
+        f"max_edge_gain = {_float(quality.max_edge_gain)}",
+        f"max_edge_gain_with_contrast = {_float(quality.max_edge_gain_with_contrast)}",
+        f"max_contrast_gain_for_edge = {_float(quality.max_contrast_gain_for_edge)}",
+    ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1511,15 +1588,44 @@ def _read_report(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_local_path(value: str) -> Path:
+def _allowed_origins() -> list[str]:
+    configured = os.environ.get("IRISCOPE_ALLOWED_ORIGINS")
+    if configured:
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ]
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host in {"", "localhost", "testserver", "127.0.0.1", "::1"} or host.startswith("127.")
+
+
+def _request_token(request: Request) -> str:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return request.headers.get("x-iriscope-token", "").strip()
+
+
+def _calibration_root() -> Path:
+    return Path(os.environ.get("IRISCOPE_CALIBRATION_ROOT", PROJECT_ROOT / "calibration")).expanduser().resolve()
+
+
+def _resolve_session_path(value: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     resolved = path.resolve()
     if not resolved.exists():
-        raise FileNotFoundError(f"Path does not exist: {resolved}")
-    if resolved.is_file() and resolved.suffix.lower() in IMAGE_SUFFIXES:
-        return resolved.parent
+        raise HTTPException(status_code=422, detail=f"Path does not exist: {resolved}")
+    if not resolved.is_dir():
+        raise HTTPException(status_code=422, detail=f"Session path is not a directory: {resolved}")
+    if not _is_relative_to(resolved, CAPTURES_ROOT):
+        raise HTTPException(status_code=422, detail=f"Session path is outside the capture root: {resolved}")
     return resolved
 
 
@@ -1536,6 +1642,9 @@ def _resolve_optional_image_path(value: str | None) -> Path | None:
         raise FileNotFoundError(f"Calibration path is not a file: {resolved}")
     if resolved.suffix.lower() not in IMAGE_SUFFIXES:
         raise ValueError(f"Unsupported calibration image type: {resolved.suffix}")
+    calibration_root = _calibration_root()
+    if not (_is_relative_to(resolved, CAPTURES_ROOT) or _is_relative_to(resolved, calibration_root)):
+        raise ValueError(f"Calibration image is outside allowed roots: {resolved}")
     return resolved
 
 
@@ -1571,3 +1680,6 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+app = create_app()

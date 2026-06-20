@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from iriscope import web_api
+from iriscope.processing import ProcessResult
 
 
 def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypatch):
@@ -17,6 +18,8 @@ def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypa
     assert payload["config"]["exists"] is True
     assert payload["config"]["path"] == str(tmp_path / ".iriscope.toml")
     assert payload["config"]["pi_host"] == "iriscope-pi.local"
+    assert payload["config"]["ssh_key_configured"] is True
+    assert "ssh_key" not in payload["config"]
     assert payload["config"]["capture"]["count"] == 16
     assert payload["config"]["capture"]["awb"] == "manual"
     assert payload["config"]["capture"]["awb_gains"] == [2.0, 1.2]
@@ -24,6 +27,12 @@ def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypa
     assert "rpicam-vid" in payload["config"]["preview"]["command_preview"]
     assert payload["health"]["ssh"]["status"] == "test"
     assert payload["capture_root"] == str(tmp_path / "captures")
+
+    config_response = client.get("/api/config")
+    assert config_response.status_code == 200
+    config_payload = config_response.json()
+    assert config_payload["config"]["pi"]["ssh_key"] == "C:/keys/test_rsa"
+    assert config_payload["config"]["processing"]["quality"]["max_clip_fraction"] == 0.2
 
 
 def test_sessions_expose_outputs_and_artifact_endpoints_are_bounded(tmp_path: Path, monkeypatch):
@@ -140,6 +149,55 @@ def test_label_contract_loads_defaults_and_persists_updates(tmp_path: Path, monk
     assert loaded.json()["label"]["notes"] == "reviewed"
 
 
+def test_session_endpoints_reject_paths_outside_capture_root(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    outside = tmp_path / "outside-session"
+    outside.mkdir()
+
+    preprocess = client.post("/api/preprocess", json={"session_dir": str(outside)})
+    label = client.get("/api/label", params={"session_dir": str(outside)})
+    review = client.get("/api/review", params={"session_dir": str(outside)})
+
+    assert preprocess.status_code == 422
+    assert label.status_code == 422
+    assert review.status_code == 422
+
+
+def test_process_uses_configured_save_intermediates_when_omitted(tmp_path: Path, monkeypatch):
+    client, captures = _client(tmp_path, monkeypatch)
+    session = captures / "S003_left_20260616_153000"
+    session.mkdir()
+    _write_image(session / "frame_0001.png")
+    captured_settings = {}
+
+    def fake_process_session(session_dir, output_dir, settings, dark_path, flat_path):
+        captured_settings["save_intermediates"] = settings.save_intermediates
+        processed = Path(session_dir) / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        _write_image(processed / "enhanced.jpg")
+        _write_image(processed / "enhanced.tif")
+        _write_image(processed / "contact_sheet.jpg")
+        report = processed / "report.json"
+        report.write_text(
+            json.dumps({"quality_status": "pass", "requires_recapture": False, "quality_flags": []}),
+            encoding="utf-8",
+        )
+        return ProcessResult(
+            processed,
+            processed / "enhanced.jpg",
+            processed / "enhanced.tif",
+            report,
+            processed / "contact_sheet.jpg",
+        )
+
+    monkeypatch.setattr(web_api, "process_session", fake_process_session)
+
+    response = client.post("/api/process", json={"session_dir": str(session)})
+
+    assert response.status_code == 200
+    assert captured_settings["save_intermediates"] is False
+
+
 def test_config_endpoint_persists_settings(tmp_path: Path, monkeypatch):
     client, _ = _client(tmp_path, monkeypatch)
 
@@ -191,6 +249,25 @@ def test_config_endpoint_persists_settings(tmp_path: Path, monkeypatch):
                 "min_frames": 4,
                 "save_intermediates": True,
                 "max_working_edge": 640,
+                "quality": {
+                    "max_clip_fraction": 0.18,
+                    "min_relative_focus": 0.4,
+                    "min_median_focus": 11.0,
+                    "min_mean_luma": 0.03,
+                    "max_mean_luma": 0.97,
+                    "min_alignment_score": 0.6,
+                    "max_eval_clip_fraction": 0.32,
+                    "min_mask_coverage": 0.07,
+                    "max_mask_coverage": 0.45,
+                    "min_pupil_iris_ratio": 0.2,
+                    "max_pupil_iris_ratio": 0.65,
+                    "min_iris_radius_fraction": 0.18,
+                    "max_iris_radius_fraction": 0.52,
+                    "max_center_offset_fraction": 0.25,
+                    "max_edge_gain": 6.5,
+                    "max_edge_gain_with_contrast": 5.0,
+                    "max_contrast_gain_for_edge": 2.8,
+                },
             },
         },
     )
@@ -201,6 +278,8 @@ def test_config_endpoint_persists_settings(tmp_path: Path, monkeypatch):
     assert 'awb = "manual"' in text
     assert 'tuning_file = "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json"' in text
     assert 'stack_method = "median"' in text
+    assert "[processing.quality]" in text
+    assert "max_clip_fraction = 0.18" in text
 
 
 def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path]:
@@ -212,12 +291,16 @@ def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path]:
 [pi]
 host = "iriscope-pi.local"
 user = "camera"
+ssh_key = "C:/keys/test_rsa"
 
 [capture]
 count = 16
 shutter_us = 6000
 gain = 1.5
 awb_gains = [2.0, 1.2]
+
+[processing]
+save_intermediates = false
 """,
         encoding="utf-8",
     )

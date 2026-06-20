@@ -3,6 +3,7 @@
 Iriscope is a local-first capture and enhancement pipeline for a Raspberry Pi Zero W with an IMX477 Raspberry Pi HQ camera. The Pi captures DNG/JPEG frames with `rpicam-still`; the computer pulls the session and performs RAW development, frame filtering, alignment, stacking, iris masking, enhancement, and review export.
 
 Iris images are biometric data. This tool keeps processing local and intentionally does not upload images or perform identity matching.
+See [SECURITY.md](SECURITY.md) for local data-handling and remote API guidance.
 
 ## Quick Start
 
@@ -86,6 +87,8 @@ iriscope eval-dataset datasets\CASIA-Iris-Interval --offset 0 --limit 60 --max-w
 
 The evaluator writes `dataset_report.json` and `dataset_sessions.csv` under `datasets\eval-runs\...`. It records frame quality, post-alignment stack frame count, mask geometry, contrast/edge gains, and heuristic flags such as heavy clipping, weak alignment, bad mask geometry, and possible oversharpening.
 
+Processing quality thresholds are configurable under `[processing.quality]` in `.iriscope.toml`. The defaults preserve the built-in heuristics for clipping, focus, luminance, alignment, mask coverage, pupil/iris ratio, dataset geometry checks, and oversharpening flags.
+
 ## Useful Commands
 
 ```powershell
@@ -145,3 +148,5 @@ stream_timeout_s = 0
 Before calibration, still snapshots, or RAW stack capture, the host API stops the preview stream so `rpicam-still` can acquire the camera.
 
 Label records are for local dataset governance only. They track consent, allowed use, exclusion from model training, quality notes, lens/lighting metadata, and subject codes. Iriscope does not perform identity matching or biometric enrollment.
+
+The API is unauthenticated only for loopback use. If you bind it to a non-loopback host, set `IRISCOPE_ADMIN_TOKEN` and pass it as `Authorization: Bearer <token>` or `X-Iriscope-Token`. Web API session and artifact paths are bounded to the configured capture root; calibration files are accepted only from the capture root or project `calibration/` directory.

@@ -1,5 +1,6 @@
 import type {
   ConfigPayload,
+  ConfigResponse,
   LabelRecord,
   PreprocessReport,
   ProcessOptions,
@@ -36,6 +37,10 @@ export function getSessions() {
   return apiGet<SessionRecord[]>("/api/sessions");
 }
 
+export function getConfig() {
+  return apiGet<ConfigResponse>("/api/config");
+}
+
 export function preprocessSession(sessionDir: string, maxFrames = 16) {
   return apiPost<{ ok: boolean; report: PreprocessReport }>("/api/preprocess", {
     session_dir: sessionDir,
@@ -54,7 +59,7 @@ export function processSession(sessionDir: string, options: ProcessOptions) {
 }
 
 export function saveConfig(config: ConfigPayload) {
-  return apiPost<{ ok: boolean; path: string; config: unknown }>("/api/config", config);
+  return apiPost<ConfigResponse>("/api/config", config);
 }
 
 export function getLabel(sessionDir: string) {

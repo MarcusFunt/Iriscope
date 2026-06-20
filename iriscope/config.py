@@ -39,7 +39,7 @@ class CaptureSettings:
     gain: float = 0.0
     awb: str = "auto"
     awb_gains: tuple[float, float] | None = (3.2, 1.4)
-    denoise: str = "off"
+    denoise: str = "cdn_fast"
     quality: int = 95
     width: int | None = None
     height: int | None = None
@@ -68,12 +68,34 @@ class PreviewSettings:
 
 
 @dataclass(frozen=True)
+class QualityThresholds:
+    max_clip_fraction: float = 0.20
+    min_relative_focus: float = 0.35
+    min_median_focus: float = 10.0
+    min_mean_luma: float = 0.02
+    max_mean_luma: float = 0.98
+    min_alignment_score: float = 0.55
+    max_eval_clip_fraction: float = 0.35
+    min_mask_coverage: float = 0.06
+    max_mask_coverage: float = 0.48
+    min_pupil_iris_ratio: float = 0.18
+    max_pupil_iris_ratio: float = 0.68
+    min_iris_radius_fraction: float = 0.16
+    max_iris_radius_fraction: float = 0.55
+    max_center_offset_fraction: float = 0.28
+    max_edge_gain: float = 7.0
+    max_edge_gain_with_contrast: float = 5.5
+    max_contrast_gain_for_edge: float = 3.0
+
+
+@dataclass(frozen=True)
 class ProcessingSettings:
     stack_method: str = "sigma"
     sigma: float = 2.5
     min_frames: int = 3
     save_intermediates: bool = True
     max_working_edge: int | None = None
+    quality: QualityThresholds = QualityThresholds()
 
 
 @dataclass(frozen=True)
@@ -150,7 +172,7 @@ def _parse_capture(data: dict[str, Any]) -> CaptureSettings:
         gain=float(data.get("gain", 0.0)),
         awb=awb_mode,
         awb_gains=awb_gains,
-        denoise=str(data.get("denoise", "off")),
+        denoise=str(data.get("denoise", "cdn_fast")),
         quality=int(data.get("quality", 95)),
         width=_optional_int(data.get("width")),
         height=_optional_int(data.get("height")),
@@ -187,6 +209,36 @@ def _parse_processing(data: dict[str, Any]) -> ProcessingSettings:
         min_frames=int(data.get("min_frames", 3)),
         save_intermediates=bool(data.get("save_intermediates", True)),
         max_working_edge=_optional_int(data.get("max_working_edge")),
+        quality=parse_quality_thresholds(data.get("quality", {})),
+    )
+
+
+def parse_quality_thresholds(data: dict[str, Any]) -> QualityThresholds:
+    defaults = QualityThresholds()
+    if not data:
+        return defaults
+    return QualityThresholds(
+        max_clip_fraction=float(data.get("max_clip_fraction", defaults.max_clip_fraction)),
+        min_relative_focus=float(data.get("min_relative_focus", defaults.min_relative_focus)),
+        min_median_focus=float(data.get("min_median_focus", defaults.min_median_focus)),
+        min_mean_luma=float(data.get("min_mean_luma", defaults.min_mean_luma)),
+        max_mean_luma=float(data.get("max_mean_luma", defaults.max_mean_luma)),
+        min_alignment_score=float(data.get("min_alignment_score", defaults.min_alignment_score)),
+        max_eval_clip_fraction=float(data.get("max_eval_clip_fraction", defaults.max_eval_clip_fraction)),
+        min_mask_coverage=float(data.get("min_mask_coverage", defaults.min_mask_coverage)),
+        max_mask_coverage=float(data.get("max_mask_coverage", defaults.max_mask_coverage)),
+        min_pupil_iris_ratio=float(data.get("min_pupil_iris_ratio", defaults.min_pupil_iris_ratio)),
+        max_pupil_iris_ratio=float(data.get("max_pupil_iris_ratio", defaults.max_pupil_iris_ratio)),
+        min_iris_radius_fraction=float(data.get("min_iris_radius_fraction", defaults.min_iris_radius_fraction)),
+        max_iris_radius_fraction=float(data.get("max_iris_radius_fraction", defaults.max_iris_radius_fraction)),
+        max_center_offset_fraction=float(data.get("max_center_offset_fraction", defaults.max_center_offset_fraction)),
+        max_edge_gain=float(data.get("max_edge_gain", defaults.max_edge_gain)),
+        max_edge_gain_with_contrast=float(
+            data.get("max_edge_gain_with_contrast", defaults.max_edge_gain_with_contrast)
+        ),
+        max_contrast_gain_for_edge=float(
+            data.get("max_contrast_gain_for_edge", defaults.max_contrast_gain_for_edge)
+        ),
     )
 
 

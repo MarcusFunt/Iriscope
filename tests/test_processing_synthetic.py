@@ -28,6 +28,8 @@ def test_process_session_with_synthetic_iris_stack(tmp_path: Path):
     assert isinstance(report["requires_recapture"], bool)
     assert "quality_reasons" in report
     assert "forced_keep_indices" in report
+    assert report["settings"]["quality"]["max_clip_fraction"] == 0.2
+    assert report["settings"]["quality"]["min_alignment_score"] == 0.55
     assert report["outputs"]["enhanced_jpg"].endswith("enhanced.jpg")
 
 

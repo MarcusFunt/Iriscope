@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import QualityThresholds
 from .processing import detect_iris_mask, find_input_images, load_image_float, quality_metrics
 
 
@@ -49,8 +50,13 @@ def default_label() -> dict[str, Any]:
     }
 
 
-def inspect_preprocessing(session_dir: str | Path, max_frames: int = 16) -> dict[str, Any]:
+def inspect_preprocessing(
+    session_dir: str | Path,
+    max_frames: int = 16,
+    thresholds: QualityThresholds | None = None,
+) -> dict[str, Any]:
     root = Path(session_dir)
+    thresholds = thresholds or QualityThresholds()
     images = find_input_images(root)
     metrics = []
     loaded_images = []
@@ -72,7 +78,7 @@ def inspect_preprocessing(session_dir: str | Path, max_frames: int = 16) -> dict
                 "mask_method": mask_report["method"],
                 "mask_coverage": float(mask_report["coverage"]),
                 "pupil_to_iris_ratio": ratio,
-                "mask_ready": _mask_ready(float(mask_report["coverage"]), ratio),
+                "mask_ready": _mask_ready(float(mask_report["coverage"]), ratio, thresholds),
             }
         )
     report = {
@@ -139,8 +145,12 @@ def _inspect_mask(images: list[Any], metrics: list[dict[str, Any]]) -> dict[str,
     return mask_report
 
 
-def _mask_ready(coverage: float, pupil_to_iris_ratio: float) -> bool:
-    return 0.06 <= coverage <= 0.48 and 0.18 <= pupil_to_iris_ratio <= 0.68
+def _mask_ready(coverage: float, pupil_to_iris_ratio: float, thresholds: QualityThresholds | None = None) -> bool:
+    thresholds = thresholds or QualityThresholds()
+    return (
+        thresholds.min_mask_coverage <= coverage <= thresholds.max_mask_coverage
+        and thresholds.min_pupil_iris_ratio <= pupil_to_iris_ratio <= thresholds.max_pupil_iris_ratio
+    )
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:

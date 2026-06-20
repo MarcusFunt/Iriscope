@@ -26,6 +26,7 @@ import {
   apiPost,
   artifactUrl,
   createPiWebRTCAnswer,
+  getConfig,
   getLabel,
   getSessions,
   getStatus,
@@ -148,6 +149,7 @@ const defaultProcessOptions: ProcessOptions = {
   stack_method: "sigma",
   sigma: 2.5,
   min_frames: 3,
+  save_intermediates: true,
   max_working_edge: null,
   dark_path: "",
   flat_path: "",
@@ -182,19 +184,19 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextStatus, nextSessions] = await Promise.all([getStatus(), getSessions()]);
+      const [nextStatus, nextSessions, nextConfig] = await Promise.all([getStatus(), getSessions(), getConfig()]);
       setStatus(nextStatus);
       setSessions(nextSessions);
       if (!captureHydrated) {
-        setCapture(captureFromStatus(nextStatus));
+        setCapture(captureFromConfig(nextConfig.config));
         setCaptureHydrated(true);
       }
       if (!processHydrated) {
-        setProcessOptions(processFromStatus(nextStatus));
+        setProcessOptions(processFromConfig(nextConfig.config));
         setProcessHydrated(true);
       }
       if (!settingsHydrated) {
-        setSettingsDraft(configFromStatus(nextStatus));
+        setSettingsDraft(nextConfig.config);
         setSettingsHydrated(true);
       }
       if (!selectedSession && nextSessions[0]) {
@@ -469,10 +471,13 @@ export default function App() {
                 busy={busy}
                 onSave={() =>
                   settingsDraft
-                    ? runAction("Save Settings", () => saveConfig(settingsDraft), () => {
-                        setCaptureHydrated(false);
-                        setProcessHydrated(false);
-                        setSettingsHydrated(false);
+                    ? runAction("Save Settings", () => saveConfig(settingsDraft), (result) => {
+                        setSettingsDraft(result.config);
+                        setCapture(captureFromConfig(result.config));
+                        setProcessOptions(processFromConfig(result.config));
+                        setCaptureHydrated(true);
+                        setProcessHydrated(true);
+                        setSettingsHydrated(true);
                       })
                     : undefined
                 }
@@ -1009,6 +1014,14 @@ function PreprocessPanel({
           <input value={processOptions.flat_path} onChange={(event) => setProcessOptions({ ...processOptions, flat_path: event.target.value })} />
         </Field>
       </div>
+      <label className="checkbox-line">
+        <input
+          type="checkbox"
+          checked={processOptions.save_intermediates}
+          onChange={(event) => setProcessOptions({ ...processOptions, save_intermediates: event.target.checked })}
+        />
+        Save stacked image and iris mask
+      </label>
       <div className="button-row">
         <button className="secondary" onClick={onPreprocess} disabled={busy !== null || !sessionDir}>
           <RefreshCw size={17} />
@@ -1615,8 +1628,8 @@ function parseTags(value: string) {
     .filter(Boolean);
 }
 
-function captureFromStatus(status: StatusResponse): CaptureForm {
-  const capture = status.config.capture;
+function captureFromConfig(config: ConfigPayload): CaptureForm {
+  const capture = config.capture;
   return {
     subject: defaultCapture.subject,
     eye: defaultCapture.eye,
@@ -1629,69 +1642,16 @@ function captureFromStatus(status: StatusResponse): CaptureForm {
   };
 }
 
-function processFromStatus(status: StatusResponse): ProcessOptions {
-  const processing = status.config.processing;
+function processFromConfig(config: ConfigPayload): ProcessOptions {
+  const processing = config.processing;
   return {
     stack_method: processing.stack_method,
     sigma: processing.sigma,
     min_frames: processing.min_frames,
+    save_intermediates: processing.save_intermediates,
     max_working_edge: processing.max_working_edge ?? null,
     dark_path: "",
     flat_path: "",
-  };
-}
-
-function configFromStatus(status: StatusResponse): ConfigPayload {
-  const capture = status.config.capture;
-  const preview = status.config.preview;
-  const processing = status.config.processing;
-  return {
-    pi: {
-      host: status.config.pi_host,
-      user: status.config.pi_user,
-      port: status.config.pi_port ?? 22,
-      remote_root: status.config.remote_root,
-      ssh_key: status.config.ssh_key ?? null,
-      connect_timeout: status.config.connect_timeout ?? 15,
-    },
-    capture: {
-      count: capture.count,
-      shutter_us: capture.shutter_us,
-      gain: capture.gain,
-      awb: capture.awb ?? "auto",
-      awb_gains: [awbGain(capture.awb_gains, 0), awbGain(capture.awb_gains, 1)],
-      denoise: capture.denoise as ConfigPayload["capture"]["denoise"],
-      quality: capture.quality,
-      width: capture.width ?? null,
-      height: capture.height ?? null,
-      metering: capture.metering ?? "centre",
-      exposure: capture.exposure ?? "normal",
-      ev: capture.ev ?? 0,
-      brightness: capture.brightness ?? 0,
-      contrast: capture.contrast ?? 1,
-      saturation: capture.saturation ?? 1,
-      sharpness: capture.sharpness ?? 1,
-      tuning_file: capture.tuning_file ?? null,
-      mode: capture.mode ?? null,
-      hdr: capture.hdr ?? "off",
-      nopreview: capture.nopreview ?? true,
-      immediate: capture.immediate ?? true,
-      raw: capture.raw ?? true,
-    },
-    preview: {
-      width: preview.width,
-      height: preview.height,
-      framerate: preview.framerate,
-      quality: preview.quality,
-      stream_timeout_s: preview.stream_timeout_s,
-    },
-    processing: {
-      stack_method: processing.stack_method,
-      sigma: processing.sigma,
-      min_frames: processing.min_frames,
-      save_intermediates: processing.save_intermediates,
-      max_working_edge: processing.max_working_edge ?? null,
-    },
   };
 }
 

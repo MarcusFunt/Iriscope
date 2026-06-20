@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -63,6 +64,25 @@ stack_method = "sigma"
 sigma = 2.5
 min_frames = 3
 save_intermediates = true
+
+[processing.quality]
+max_clip_fraction = 0.20
+min_relative_focus = 0.35
+min_median_focus = 10.0
+min_mean_luma = 0.02
+max_mean_luma = 0.98
+min_alignment_score = 0.55
+max_eval_clip_fraction = 0.35
+min_mask_coverage = 0.06
+max_mask_coverage = 0.48
+min_pupil_iris_ratio = 0.18
+max_pupil_iris_ratio = 0.68
+min_iris_radius_fraction = 0.16
+max_iris_radius_fraction = 0.55
+max_center_offset_fraction = 0.28
+max_edge_gain = 7.0
+max_edge_gain_with_contrast = 5.5
+max_contrast_gain_for_edge = 3.0
 """
 
 
@@ -242,6 +262,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
         import uvicorn
     except ModuleNotFoundError as exc:
         raise RuntimeError("The web API requires `pip install -e .[web]`.") from exc
+    if not _is_loopback_bind(args.host) and not os.environ.get("IRISCOPE_ADMIN_TOKEN"):
+        raise RuntimeError(
+            "Binding the Iriscope API to a non-loopback host requires IRISCOPE_ADMIN_TOKEN. "
+            "Use --host 127.0.0.1 for local-only access."
+        )
     _print(f"Starting Iriscope API at http://{args.host}:{args.port}")
     uvicorn.run(
         "iriscope.web_api:app",
@@ -251,6 +276,11 @@ def _cmd_web(args: argparse.Namespace) -> int:
         log_level="info",
     )
     return 0
+
+
+def _is_loopback_bind(host: str) -> bool:
+    clean = host.strip().lower()
+    return clean in {"localhost", "127.0.0.1", "::1"}
 
 
 def _add_pi_options(parser: argparse.ArgumentParser) -> None:

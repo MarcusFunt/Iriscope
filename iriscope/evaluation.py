@@ -9,7 +9,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from .config import ProcessingSettings
+from .config import ProcessingSettings, QualityThresholds, parse_quality_thresholds
 from .processing import find_input_images, load_image_float, process_session
 
 
@@ -141,6 +141,7 @@ def summarize_processed_session(report_json: str | Path) -> dict[str, Any]:
     after_stats = _image_stats(outputs.get("enhanced_tif") or outputs.get("enhanced_jpg"), outputs.get("iris_mask"))
     contrast_gain = _safe_ratio(after_stats.get("luma_std", 0.0), before_stats.get("luma_std", 0.0))
     edge_gain = _safe_ratio(after_stats.get("edge_score", 0.0), before_stats.get("edge_score", 0.0))
+    thresholds = parse_quality_thresholds(report.get("settings", {}).get("quality", {}))
 
     flags = _quality_flags(
         geometry=geometry,
@@ -152,6 +153,7 @@ def summarize_processed_session(report_json: str | Path) -> dict[str, Any]:
         alignment_median=median(alignment_scores) if alignment_scores else 1.0,
         contrast_gain=contrast_gain,
         edge_gain=edge_gain,
+        thresholds=thresholds,
     )
     return {
         "report_json": str(report_path),
@@ -275,27 +277,32 @@ def _quality_flags(
     alignment_median: float,
     contrast_gain: float,
     edge_gain: float,
+    thresholds: QualityThresholds | None = None,
 ) -> list[str]:
+    thresholds = thresholds or QualityThresholds()
     flags: list[str] = []
     if kept_count < min_frames:
         flags.append("too_few_kept_frames")
     if stack_count < min_frames:
         flags.append("too_few_aligned_frames")
-    if not 0.06 <= geometry["coverage"] <= 0.48:
+    if not thresholds.min_mask_coverage <= geometry["coverage"] <= thresholds.max_mask_coverage:
         flags.append("mask_coverage_out_of_range")
-    if not 0.18 <= geometry["pupil_to_iris_ratio"] <= 0.68:
+    if not thresholds.min_pupil_iris_ratio <= geometry["pupil_to_iris_ratio"] <= thresholds.max_pupil_iris_ratio:
         flags.append("pupil_iris_ratio_out_of_range")
-    if not 0.16 <= geometry["iris_radius_fraction"] <= 0.55:
+    if not thresholds.min_iris_radius_fraction <= geometry["iris_radius_fraction"] <= thresholds.max_iris_radius_fraction:
         flags.append("iris_radius_out_of_range")
-    if geometry["center_offset_fraction"] > 0.28:
+    if geometry["center_offset_fraction"] > thresholds.max_center_offset_fraction:
         flags.append("iris_center_far_from_frame_center")
-    if focus_median < 10.0:
+    if focus_median < thresholds.min_median_focus:
         flags.append("low_focus")
-    if clip_max > 0.35:
+    if clip_max > thresholds.max_eval_clip_fraction:
         flags.append("heavy_clipping")
-    if alignment_median < 0.55:
+    if alignment_median < thresholds.min_alignment_score:
         flags.append("weak_alignment")
-    if edge_gain > 7.0 or (edge_gain > 5.5 and contrast_gain > 3.0):
+    if edge_gain > thresholds.max_edge_gain or (
+        edge_gain > thresholds.max_edge_gain_with_contrast
+        and contrast_gain > thresholds.max_contrast_gain_for_edge
+    ):
         flags.append("possible_oversharpening")
     return flags
 

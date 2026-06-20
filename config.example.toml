@@ -36,3 +36,22 @@ stack_method = "sigma"
 sigma = 2.5
 min_frames = 3
 save_intermediates = true
+
+[processing.quality]
+max_clip_fraction = 0.20
+min_relative_focus = 0.35
+min_median_focus = 10.0
+min_mean_luma = 0.02
+max_mean_luma = 0.98
+min_alignment_score = 0.55
+max_eval_clip_fraction = 0.35
+min_mask_coverage = 0.06
+max_mask_coverage = 0.48
+min_pupil_iris_ratio = 0.18
+max_pupil_iris_ratio = 0.68
+min_iris_radius_fraction = 0.16
+max_iris_radius_fraction = 0.55
+max_center_offset_fraction = 0.28
+max_edge_gain = 7.0
+max_edge_gain_with_contrast = 5.5
+max_contrast_gain_for_edge = 3.0

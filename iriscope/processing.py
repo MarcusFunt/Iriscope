@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .config import ProcessingSettings
+from .config import ProcessingSettings, QualityThresholds
 
 
 IMAGE_SUFFIXES = {".dng", ".tif", ".tiff", ".jpg", ".jpeg", ".png"}
@@ -59,7 +59,7 @@ def process_session(
         frames.append(image)
 
     frames = _crop_to_common_size(frames)
-    kept_indices, quality_reasons = select_frames(frame_metrics, settings.min_frames)
+    kept_indices, quality_reasons = select_frames(frame_metrics, settings.min_frames, settings.quality)
     if not kept_indices:
         raise RuntimeError("All frames were rejected; inspect report data or lower quality thresholds.")
     forced_keep_indices = sorted(index for index in kept_indices if str(index) in quality_reasons)
@@ -94,6 +94,7 @@ def process_session(
         min_frames=settings.min_frames,
         quality_reasons=quality_reasons,
         forced_keep_indices=forced_keep_indices,
+        thresholds=settings.quality,
     )
 
     stacked_tif = out / "stacked.tif"
@@ -246,7 +247,12 @@ def quality_metrics(image) -> dict[str, float]:
     }
 
 
-def select_frames(metrics: list[dict[str, Any]], min_frames: int = 3) -> tuple[list[int], dict[str, str]]:
+def select_frames(
+    metrics: list[dict[str, Any]],
+    min_frames: int = 3,
+    thresholds: QualityThresholds | None = None,
+) -> tuple[list[int], dict[str, str]]:
+    thresholds = thresholds or QualityThresholds()
     if not metrics:
         return [], {}
     focus_values = [float(item["focus_score"]) for item in metrics]
@@ -255,11 +261,11 @@ def select_frames(metrics: list[dict[str, Any]], min_frames: int = 3) -> tuple[l
     reasons: dict[str, str] = {}
     for index, item in enumerate(metrics):
         reason = ""
-        if float(item["clip_fraction"]) > 0.20:
+        if float(item["clip_fraction"]) > thresholds.max_clip_fraction:
             reason = "too much clipping"
-        elif float(item["focus_score"]) < max(1e-9, median_focus * 0.35):
+        elif float(item["focus_score"]) < max(1e-9, median_focus * thresholds.min_relative_focus):
             reason = "low focus score"
-        elif not 0.02 <= float(item["mean_luma"]) <= 0.98:
+        elif not thresholds.min_mean_luma <= float(item["mean_luma"]) <= thresholds.max_mean_luma:
             reason = "mean luminance out of range"
         if reason:
             reasons[str(index)] = reason
@@ -287,7 +293,9 @@ def assess_processing_quality(
     min_frames: int,
     quality_reasons: dict[str, str],
     forced_keep_indices: list[int],
+    thresholds: QualityThresholds | None = None,
 ) -> dict[str, Any]:
+    thresholds = thresholds or QualityThresholds()
     focus_values = [float(item.get("focus_score", 0.0)) for item in frame_metrics]
     luma_values = [float(item.get("mean_luma", 0.0)) for item in frame_metrics]
     clip_values = [float(item.get("clip_fraction", 0.0)) for item in frame_metrics]
@@ -314,19 +322,19 @@ def assess_processing_quality(
         flags.append("too_few_aligned_frames")
     if forced_keep_indices:
         flags.append("forced_keep_low_quality_frames")
-    if focus_median < 10.0:
+    if focus_median < thresholds.min_median_focus:
         flags.append("low_focus")
-    if luma_median < 0.02:
+    if luma_median < thresholds.min_mean_luma:
         flags.append("underexposed")
-    if luma_median > 0.98:
+    if luma_median > thresholds.max_mean_luma:
         flags.append("overexposed")
-    if clip_max > 0.20:
+    if clip_max > thresholds.max_clip_fraction:
         flags.append("heavy_clipping")
-    if alignment_median < 0.55:
+    if alignment_median < thresholds.min_alignment_score:
         flags.append("weak_alignment")
-    if not 0.06 <= mask_coverage <= 0.48:
+    if not thresholds.min_mask_coverage <= mask_coverage <= thresholds.max_mask_coverage:
         flags.append("mask_coverage_out_of_range")
-    if not 0.18 <= pupil_to_iris_ratio <= 0.68:
+    if not thresholds.min_pupil_iris_ratio <= pupil_to_iris_ratio <= thresholds.max_pupil_iris_ratio:
         flags.append("pupil_iris_ratio_out_of_range")
 
     recapture_flags = {

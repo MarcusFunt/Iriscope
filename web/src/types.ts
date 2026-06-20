@@ -52,6 +52,27 @@ export type ProcessingSettings = {
   min_frames: number;
   save_intermediates: boolean;
   max_working_edge?: number | null;
+  quality: QualityThresholds;
+};
+
+export type QualityThresholds = {
+  max_clip_fraction: number;
+  min_relative_focus: number;
+  min_median_focus: number;
+  min_mean_luma: number;
+  max_mean_luma: number;
+  min_alignment_score: number;
+  max_eval_clip_fraction: number;
+  min_mask_coverage: number;
+  max_mask_coverage: number;
+  min_pupil_iris_ratio: number;
+  max_pupil_iris_ratio: number;
+  min_iris_radius_fraction: number;
+  max_iris_radius_fraction: number;
+  max_center_offset_fraction: number;
+  max_edge_gain: number;
+  max_edge_gain_with_contrast: number;
+  max_contrast_gain_for_edge: number;
 };
 
 export type HealthCheck = {
@@ -95,7 +116,7 @@ export type StatusResponse = {
     pi_user: string;
     pi_port: number;
     remote_root: string;
-    ssh_key: string | null;
+    ssh_key_configured: boolean;
     connect_timeout: number;
     capture: CaptureSettings;
     preview: PreviewSettings;
@@ -149,6 +170,12 @@ export type ConfigPayload = {
     stream_timeout_s: number;
   };
   processing: ProcessingSettings;
+};
+
+export type ConfigResponse = {
+  ok: boolean;
+  path: string;
+  config: ConfigPayload;
 };
 
 export type SessionRecord = {
@@ -218,6 +245,7 @@ export type ProcessOptions = {
   stack_method: "sigma" | "median" | "mean";
   sigma: number;
   min_frames: number;
+  save_intermediates: boolean;
   max_working_edge: number | null;
   dark_path: string;
   flat_path: string;

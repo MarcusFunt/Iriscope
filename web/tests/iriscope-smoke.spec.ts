@@ -14,9 +14,85 @@ const pngPixel = Buffer.from(
   "base64",
 );
 
+const qualityThresholds = {
+  max_clip_fraction: 0.2,
+  min_relative_focus: 0.35,
+  min_median_focus: 10,
+  min_mean_luma: 0.02,
+  max_mean_luma: 0.98,
+  min_alignment_score: 0.55,
+  max_eval_clip_fraction: 0.35,
+  min_mask_coverage: 0.06,
+  max_mask_coverage: 0.48,
+  min_pupil_iris_ratio: 0.18,
+  max_pupil_iris_ratio: 0.68,
+  min_iris_radius_fraction: 0.16,
+  max_iris_radius_fraction: 0.55,
+  max_center_offset_fraction: 0.28,
+  max_edge_gain: 7,
+  max_edge_gain_with_contrast: 5.5,
+  max_contrast_gain_for_edge: 3,
+};
+
+const editableConfig = {
+  pi: {
+    host: "iriscope-pi.local",
+    user: "camera",
+    port: 22,
+    remote_root: "/home/camera/iriscope",
+    ssh_key: "C:/Iriscope/id_rsa",
+    connect_timeout: 15,
+  },
+  capture: {
+    count: 16,
+    shutter_us: 0,
+    gain: 0,
+    iso_equivalent: 0,
+    awb: "auto",
+    awb_gains: [3.2, 1.4],
+    denoise: "cdn_fast",
+    quality: 95,
+    width: null,
+    height: null,
+    metering: "centre",
+    exposure: "normal",
+    ev: 0,
+    brightness: 0,
+    contrast: 1,
+    saturation: 1,
+    sharpness: 1,
+    tuning_file: "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json",
+    mode: null,
+    hdr: "off",
+    nopreview: true,
+    immediate: true,
+    raw: true,
+    command_preview: "rpicam-still --raw --awb auto --tuning-file /usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json -o frame_0001.jpg",
+  },
+  preview: {
+    width: 640,
+    height: 480,
+    framerate: 12,
+    quality: 70,
+    stream_timeout_s: 0,
+    command_preview: "rpicam-vid -t 0 -n --codec mjpeg -o -",
+    media_type: "multipart/x-mixed-replace; boundary=iriscope-frame",
+  },
+  processing: {
+    stack_method: "sigma",
+    sigma: 2.5,
+    min_frames: 3,
+    save_intermediates: true,
+    max_working_edge: null,
+    quality: qualityThresholds,
+  },
+};
+
 test("main workstation flow loads config, labels, preprocesses, processes, and saves", async ({ page }) => {
   let processed = false;
   let savedLabel: Record<string, unknown> | null = null;
+  let savedConfig: typeof editableConfig | null = null;
+  let processPayload: Record<string, unknown> | null = null;
   let piWebrtcRequested = false;
   let piStreamRequested = false;
 
@@ -27,48 +103,15 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
         config: {
           exists: true,
           path: "C:/Iriscope/.iriscope.toml",
-          pi_host: "iriscope-pi.local",
-          pi_user: "camera",
-          pi_port: 22,
-          remote_root: "/home/camera/iriscope",
-          ssh_key: "C:/Iriscope/id_rsa",
-          connect_timeout: 15,
-          capture: {
-            count: 16,
-            shutter_us: 0,
-            gain: 0,
-            iso_equivalent: 0,
-            awb: "auto",
-            awb_gains: [3.2, 1.4],
-            denoise: "cdn_fast",
-            quality: 95,
-            width: null,
-            height: null,
-            metering: "centre",
-            exposure: "normal",
-            ev: 0,
-            brightness: 0,
-            contrast: 1,
-            saturation: 1,
-            sharpness: 1,
-            tuning_file: "/usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json",
-            mode: null,
-            hdr: "off",
-            nopreview: true,
-            immediate: true,
-            raw: true,
-            command_preview: "rpicam-still --raw --awb auto --tuning-file /usr/share/libcamera/ipa/rpi/vc4/imx477_scientific.json -o frame_0001.jpg",
-          },
-          preview: {
-            width: 640,
-            height: 480,
-            framerate: 12,
-            quality: 70,
-            stream_timeout_s: 0,
-            command_preview: "rpicam-vid -t 0 -n --codec mjpeg -o -",
-            media_type: "multipart/x-mixed-replace; boundary=iriscope-frame",
-          },
-          processing: { stack_method: "sigma", sigma: 2.5, min_frames: 3, save_intermediates: true, max_working_edge: null },
+          pi_host: editableConfig.pi.host,
+          pi_user: editableConfig.pi.user,
+          pi_port: editableConfig.pi.port,
+          remote_root: editableConfig.pi.remote_root,
+          ssh_key_configured: true,
+          connect_timeout: editableConfig.pi.connect_timeout,
+          capture: editableConfig.capture,
+          preview: editableConfig.preview,
+          processing: editableConfig.processing,
         },
         health: {
           ssh: { ok: true, status: "ok", message: "SSH key access verified." },
@@ -86,6 +129,15 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
         capture_root: "C:/Iriscope/captures",
       },
     });
+  });
+
+  await page.route("**/api/config", async (route) => {
+    if (route.request().method() === "POST") {
+      savedConfig = route.request().postDataJSON() as typeof editableConfig;
+      await route.fulfill({ json: { ok: true, path: "C:/Iriscope/.iriscope.toml", config: savedConfig } });
+      return;
+    }
+    await route.fulfill({ json: { ok: true, path: "C:/Iriscope/.iriscope.toml", config: editableConfig } });
   });
 
   await page.route("**/api/sessions", async (route) => {
@@ -160,6 +212,7 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
 
   await page.route("**/api/process", async (route) => {
     processed = true;
+    processPayload = route.request().postDataJSON() as Record<string, unknown>;
     await route.fulfill({
       json: {
         ok: true,
@@ -203,6 +256,11 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.getByLabel("AWB mode")).toHaveValue("auto");
   await expect(page.getByLabel("AWB red")).toHaveValue("3.2");
 
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Save stacked image and iris mask").uncheck();
+  await page.getByRole("button", { name: "Save Settings" }).click();
+  await expect.poll(() => savedConfig?.processing.save_intermediates).toBe(false);
+
   await page.getByRole("button", { name: "Label" }).click();
   await expect(page.getByLabel("Subject code")).toHaveValue("S042");
   await expect(page.getByLabel("Notes")).toHaveValue("existing note");
@@ -213,6 +271,7 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.getByText("42.5").first()).toBeVisible();
 
   await page.getByRole("button", { name: "Process Session" }).click();
+  await expect.poll(() => processPayload?.save_intermediates).toBe(false);
   await expect(page.getByRole("img", { name: "Enhanced" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Report JSON" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Review" })).toBeEnabled();
