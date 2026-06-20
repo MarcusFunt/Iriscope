@@ -1,0 +1,12 @@
+[Unit]
+Description=Iriscope boot repository and dependency update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/iriscope-boot-update
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

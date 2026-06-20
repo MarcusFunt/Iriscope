@@ -1,0 +1,14 @@
+openssh-server
+rsync
+rpicam-apps
+avahi-daemon
+curl
+dnsutils
+exiftool
+git
+i2c-tools
+jq
+less
+tmux
+v4l-utils
+vim-tiny

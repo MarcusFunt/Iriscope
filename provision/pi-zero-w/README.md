@@ -34,23 +34,32 @@ ssh <user>@iriscope-pi.local
 
 ## Provision The Pi
 
-Copy the setup script to the Pi:
+Copy the full Pi provisioning directory to the Pi:
 
 ```powershell
-scp provision\pi-zero-w\setup-iriscope-pi.sh <user>@iriscope-pi.local:/tmp/setup-iriscope-pi.sh
+scp -r provision\pi-zero-w <user>@iriscope-pi.local:/tmp/iriscope-pi
 ```
 
 Run it on the Pi:
 
 ```bash
-chmod +x /tmp/setup-iriscope-pi.sh
-sudo /tmp/setup-iriscope-pi.sh
+chmod +x /tmp/iriscope-pi/setup-iriscope-pi.sh
+sudo /tmp/iriscope-pi/setup-iriscope-pi.sh
 ```
 
 To use a wired preview/control link instead of Wi-Fi, enable USB Ethernet gadget mode during provisioning:
 
 ```bash
-sudo /tmp/setup-iriscope-pi.sh --enable-usb-ethernet --usb-ip 10.42.0.2
+sudo /tmp/iriscope-pi/setup-iriscope-pi.sh --enable-usb-ethernet --usb-ip 10.42.0.2
+```
+
+To point the boot updater at a different checkout source, override the defaults:
+
+```bash
+sudo /tmp/iriscope-pi/setup-iriscope-pi.sh \
+  --repo-url https://github.com/MarcusFunt/Iriscope.git \
+  --branch main \
+  --app-root /opt/iriscope/app
 ```
 
 After reboot, connect the computer to the Pi Zero **USB/data** port, not the PWR-only port. Configure the computer-side USB/RNDIS interface with an address on the same subnet, for example `10.42.0.1/24`, then use `10.42.0.2` as the Iriscope Pi host.
@@ -60,6 +69,34 @@ Reboot:
 ```bash
 sudo reboot
 ```
+
+## Boot Auto-Update
+
+Provisioning installs `/usr/local/bin/iriscope-boot-update` and enables `iriscope-boot-update.service`. On every boot, after `network-online.target`, the service:
+
+- fetches `origin/main` from `https://github.com/MarcusFunt/Iriscope.git`
+- resets and cleans `/opt/iriscope/app` so local edits there are discarded
+- installs the Pi capture package list from `provision/pi-zero-w/apt-packages.txt`
+
+The updater is best effort. If GitHub or apt is unavailable, it logs the failure and keeps the existing Pi install usable. Capture files stay outside the resettable checkout under `/home/<user>/iriscope`.
+
+Run it manually:
+
+```bash
+sudo systemctl start iriscope-boot-update.service
+journalctl -u iriscope-boot-update.service
+```
+
+The service configuration lives in `/etc/default/iriscope-boot-update`:
+
+```bash
+IRISCOPE_REPO_URL=https://github.com/MarcusFunt/Iriscope.git
+IRISCOPE_BRANCH=main
+IRISCOPE_APP_ROOT=/opt/iriscope/app
+IRISCOPE_TARGET_USER=<user>
+```
+
+The Pi Zero W is kept to the capture stack only. Python processing extras, the WebRTC/API stack, and npm web dependencies are installed on the computer-side development machine, not on the Pi.
 
 ## Verify Camera Capture
 

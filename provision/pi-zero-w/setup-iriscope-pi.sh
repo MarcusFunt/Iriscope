@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PACKAGE_LIST_SRC="${SCRIPT_DIR}/apt-packages.txt"
+BOOT_UPDATE_SCRIPT_SRC="${SCRIPT_DIR}/iriscope-boot-update.sh"
+BOOT_UPDATE_SERVICE_SRC="${SCRIPT_DIR}/iriscope-boot-update.service"
+PACKAGE_LIST_DEST="/usr/local/share/iriscope/apt-packages.txt"
+BOOT_UPDATE_BIN="/usr/local/bin/iriscope-boot-update"
+BOOT_UPDATE_ENV="/etc/default/iriscope-boot-update"
+BOOT_UPDATE_SERVICE="/etc/systemd/system/iriscope-boot-update.service"
+
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo." >&2
   exit 1
@@ -21,6 +30,9 @@ BOOT_CONFIG=""
 BOOT_CMDLINE=""
 ENABLE_USB_ETHERNET=0
 USB_IP="10.42.0.2"
+REPO_URL="https://github.com/MarcusFunt/Iriscope.git"
+REPO_BRANCH="main"
+APP_ROOT="/opt/iriscope/app"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,12 +48,54 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --repo-url)
+      REPO_URL="${2:-}"
+      if [[ -z "${REPO_URL}" ]]; then
+        echo "--repo-url requires a Git repository URL." >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --branch)
+      REPO_BRANCH="${2:-}"
+      if [[ -z "${REPO_BRANCH}" ]]; then
+        echo "--branch requires a branch name." >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --app-root)
+      APP_ROOT="${2:-}"
+      if [[ -z "${APP_ROOT}" ]]; then
+        echo "--app-root requires an absolute path." >&2
+        exit 1
+      fi
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
       exit 1
       ;;
   esac
 done
+
+if [[ "${APP_ROOT}" != /* || "${APP_ROOT}" == "/" ]]; then
+  echo "--app-root must be an absolute path other than /." >&2
+  exit 1
+fi
+
+for source_file in "${PACKAGE_LIST_SRC}" "${BOOT_UPDATE_SCRIPT_SRC}" "${BOOT_UPDATE_SERVICE_SRC}"; do
+  if [[ ! -f "${source_file}" ]]; then
+    echo "Missing ${source_file}. Copy the full provision/pi-zero-w directory to the Pi before running setup." >&2
+    exit 1
+  fi
+done
+
+mapfile -t APT_PACKAGES < <(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' "${PACKAGE_LIST_SRC}")
+if [[ "${#APT_PACKAGES[@]}" -eq 0 ]]; then
+  echo "No packages found in ${PACKAGE_LIST_SRC}." >&2
+  exit 1
+fi
 
 if [[ -f /boot/firmware/config.txt ]]; then
   BOOT_CONFIG="/boot/firmware/config.txt"
@@ -57,25 +111,8 @@ fi
 echo "Updating package lists..."
 apt-get update
 
-echo "Installing required capture and transfer packages..."
-apt-get install -y \
-  openssh-server \
-  rsync \
-  rpicam-apps
-
-echo "Installing optional diagnostics and maintenance packages..."
-apt-get install -y \
-  avahi-daemon \
-  curl \
-  dnsutils \
-  exiftool \
-  git \
-  i2c-tools \
-  jq \
-  less \
-  tmux \
-  v4l-utils \
-  vim-tiny
+echo "Installing Iriscope Pi packages from ${PACKAGE_LIST_SRC}..."
+apt-get install -y "${APT_PACKAGES[@]}"
 
 echo "Enabling SSH and mDNS..."
 systemctl enable --now ssh
@@ -84,6 +121,28 @@ systemctl enable --now avahi-daemon
 echo "Creating Iriscope capture root at ${CAPTURE_ROOT}..."
 install -d -m 0750 -o "${TARGET_USER}" -g "${TARGET_USER}" "${CAPTURE_ROOT}"
 install -d -m 0750 -o "${TARGET_USER}" -g "${TARGET_USER}" "${CAPTURE_ROOT}/calibration"
+
+echo "Installing Iriscope boot updater..."
+install -d -m 0755 "$(dirname "${PACKAGE_LIST_DEST}")"
+install -m 0644 "${PACKAGE_LIST_SRC}" "${PACKAGE_LIST_DEST}"
+install -m 0755 "${BOOT_UPDATE_SCRIPT_SRC}" "${BOOT_UPDATE_BIN}"
+install -m 0644 "${BOOT_UPDATE_SERVICE_SRC}" "${BOOT_UPDATE_SERVICE}"
+
+{
+  printf 'IRISCOPE_REPO_URL=%q\n' "${REPO_URL}"
+  printf 'IRISCOPE_BRANCH=%q\n' "${REPO_BRANCH}"
+  printf 'IRISCOPE_APP_ROOT=%q\n' "${APP_ROOT}"
+  printf 'IRISCOPE_TARGET_USER=%q\n' "${TARGET_USER}"
+} > "${BOOT_UPDATE_ENV}"
+chmod 0644 "${BOOT_UPDATE_ENV}"
+
+systemctl daemon-reload
+systemctl enable iriscope-boot-update.service
+
+echo "Running initial Iriscope repository sync..."
+if ! systemctl start iriscope-boot-update.service; then
+  echo "Warning: initial Iriscope repository sync failed; the service will retry on the next boot." >&2
+fi
 
 if [[ -n "${BOOT_CONFIG}" ]]; then
   echo "Ensuring camera auto-detect is enabled in ${BOOT_CONFIG}..."
@@ -192,3 +251,4 @@ echo
 echo "Provisioning complete."
 echo "Recommended next step: sudo reboot"
 echo "After reboot, run: iriscope-camera-smoke-test"
+echo "Boot update logs: journalctl -u iriscope-boot-update.service"
