@@ -33,6 +33,7 @@ USB_IP="10.42.0.2"
 REPO_URL="https://github.com/MarcusFunt/Iriscope.git"
 REPO_BRANCH="main"
 APP_ROOT="/opt/iriscope/app"
+NETWORK_WAIT_S=120
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +69,14 @@ while [[ $# -gt 0 ]]; do
       APP_ROOT="${2:-}"
       if [[ -z "${APP_ROOT}" ]]; then
         echo "--app-root requires an absolute path." >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --network-wait-s)
+      NETWORK_WAIT_S="${2:-}"
+      if ! [[ "${NETWORK_WAIT_S}" =~ ^[0-9]+$ ]]; then
+        echo "--network-wait-s requires a non-negative integer." >&2
         exit 1
       fi
       shift 2
@@ -133,6 +142,7 @@ install -m 0644 "${BOOT_UPDATE_SERVICE_SRC}" "${BOOT_UPDATE_SERVICE}"
   printf 'IRISCOPE_BRANCH=%q\n' "${REPO_BRANCH}"
   printf 'IRISCOPE_APP_ROOT=%q\n' "${APP_ROOT}"
   printf 'IRISCOPE_TARGET_USER=%q\n' "${TARGET_USER}"
+  printf 'IRISCOPE_NETWORK_WAIT_S=%q\n' "${NETWORK_WAIT_S}"
 } > "${BOOT_UPDATE_ENV}"
 chmod 0644 "${BOOT_UPDATE_ENV}"
 

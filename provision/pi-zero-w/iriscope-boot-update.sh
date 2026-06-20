@@ -9,6 +9,7 @@ IRISCOPE_REPO_URL="${IRISCOPE_REPO_URL:-https://github.com/MarcusFunt/Iriscope.g
 IRISCOPE_BRANCH="${IRISCOPE_BRANCH:-main}"
 IRISCOPE_APP_ROOT="${IRISCOPE_APP_ROOT:-/opt/iriscope/app}"
 IRISCOPE_TARGET_USER="${IRISCOPE_TARGET_USER:-pi}"
+IRISCOPE_NETWORK_WAIT_S="${IRISCOPE_NETWORK_WAIT_S:-120}"
 
 log() {
   printf '[iriscope-boot-update] %s\n' "$*"
@@ -51,6 +52,28 @@ acquire_lock() {
   fi
 }
 
+wait_for_network() {
+  local wait_s="${IRISCOPE_NETWORK_WAIT_S}"
+  local deadline
+
+  if ! [[ "${wait_s}" =~ ^[0-9]+$ ]]; then
+    wait_s=120
+  fi
+  deadline=$((SECONDS + wait_s))
+
+  while true; do
+    if getent hosts github.com >/dev/null 2>&1; then
+      log "Network DNS is ready."
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      log "Network DNS was not ready after ${wait_s}s; continuing best-effort."
+      return 0
+    fi
+    sleep 5
+  done
+}
+
 clone_repo() {
   local app_parent
   local clone_dir
@@ -77,20 +100,38 @@ clone_repo() {
   mv "${clone_dir}" "${IRISCOPE_APP_ROOT}" || return 1
 }
 
+git_app() {
+  git -c "safe.directory=${IRISCOPE_APP_ROOT}" -C "${IRISCOPE_APP_ROOT}" "$@"
+}
+
+set_checkout_permissions() {
+  local target_owner="root"
+  local target_group="root"
+
+  if id -u "${IRISCOPE_TARGET_USER}" >/dev/null 2>&1; then
+    target_owner="${IRISCOPE_TARGET_USER}"
+    target_group="$(id -gn "${IRISCOPE_TARGET_USER}")"
+  fi
+
+  chown -R "${target_owner}:${target_group}" "${IRISCOPE_APP_ROOT}" || return 1
+  chmod -R u+rwX,g+rX,o+rX "${IRISCOPE_APP_ROOT}" || return 1
+}
+
 reset_checkout() {
-  git -C "${IRISCOPE_APP_ROOT}" checkout -B "${IRISCOPE_BRANCH}" "origin/${IRISCOPE_BRANCH}" || return 1
-  git -C "${IRISCOPE_APP_ROOT}" reset --hard "origin/${IRISCOPE_BRANCH}" || return 1
-  git -C "${IRISCOPE_APP_ROOT}" clean -ffd || return 1
-  log "Repository is current at $(git -C "${IRISCOPE_APP_ROOT}" rev-parse --short HEAD)."
+  git_app checkout -B "${IRISCOPE_BRANCH}" "origin/${IRISCOPE_BRANCH}" || return 1
+  git_app reset --hard "origin/${IRISCOPE_BRANCH}" || return 1
+  git_app clean -ffd || return 1
+  set_checkout_permissions || return 1
+  log "Repository is current at $(git_app rev-parse --short HEAD)."
 }
 
 sync_repo() {
   if [[ -d "${IRISCOPE_APP_ROOT}/.git" ]]; then
     log "Fetching ${IRISCOPE_BRANCH} from ${IRISCOPE_REPO_URL}."
-    git -C "${IRISCOPE_APP_ROOT}" remote set-url origin "${IRISCOPE_REPO_URL}" || return 1
-    if ! git -C "${IRISCOPE_APP_ROOT}" fetch --prune origin "${IRISCOPE_BRANCH}"; then
+    git_app remote set-url origin "${IRISCOPE_REPO_URL}" || return 1
+    if ! git_app fetch --prune origin "${IRISCOPE_BRANCH}"; then
       log "Fetch failed; trying the last fetched origin/${IRISCOPE_BRANCH}."
-      if git -C "${IRISCOPE_APP_ROOT}" rev-parse --verify --quiet "origin/${IRISCOPE_BRANCH}" >/dev/null; then
+      if git_app rev-parse --verify --quiet "origin/${IRISCOPE_BRANCH}" >/dev/null; then
         reset_checkout || return 1
       fi
       return 1
@@ -142,6 +183,7 @@ main() {
   require_root || return 1
   validate_config || return 1
   acquire_lock || return 0
+  wait_for_network
 
   if ! sync_repo; then
     log "Repository update failed; leaving the existing checkout in place."

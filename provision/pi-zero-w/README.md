@@ -59,7 +59,8 @@ To point the boot updater at a different checkout source, override the defaults:
 sudo /tmp/iriscope-pi/setup-iriscope-pi.sh \
   --repo-url https://github.com/MarcusFunt/Iriscope.git \
   --branch main \
-  --app-root /opt/iriscope/app
+  --app-root /opt/iriscope/app \
+  --network-wait-s 120
 ```
 
 After reboot, connect the computer to the Pi Zero **USB/data** port, not the PWR-only port. Configure the computer-side USB/RNDIS interface with an address on the same subnet, for example `10.42.0.1/24`, then use `10.42.0.2` as the Iriscope Pi host.
@@ -94,6 +95,7 @@ IRISCOPE_REPO_URL=https://github.com/MarcusFunt/Iriscope.git
 IRISCOPE_BRANCH=main
 IRISCOPE_APP_ROOT=/opt/iriscope/app
 IRISCOPE_TARGET_USER=<user>
+IRISCOPE_NETWORK_WAIT_S=120
 ```
 
 The Pi Zero W is kept to the capture stack only. Python processing extras, the WebRTC/API stack, and npm web dependencies are installed on the computer-side development machine, not on the Pi.
