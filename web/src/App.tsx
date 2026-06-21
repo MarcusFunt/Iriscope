@@ -212,7 +212,7 @@ export default function App() {
   ]);
   const [busy, setBusy] = useState<string | null>(null);
   const [snapshotNonce, setSnapshotNonce] = useState(Date.now());
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("webrtc");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("stream");
   const [snapshotFailed, setSnapshotFailed] = useState(false);
   const [livePreviewReady, setLivePreviewReady] = useState(false);
 
@@ -292,6 +292,9 @@ export default function App() {
   }, [appendLog, selectedSession, sessions]);
 
   const displayStatus = useMemo(() => (livePreviewReady ? withLivePreviewOk(status) : status), [livePreviewReady, status]);
+  const statusReady = Boolean(status);
+  const calibrationActive = Boolean(calibration?.active);
+  const previewPaused = calibrationActive || busy === "Auto Calibration";
 
   const cameraName = useMemo(() => {
     const devices = displayStatus?.camera_devices ?? [];
@@ -317,6 +320,7 @@ export default function App() {
   const qualityThresholds = displayStatus?.config.processing.quality;
   const liveSharpnessThreshold = qualityThresholds?.min_median_focus ?? 10;
   const previewSrc = snapshotFailed
+    || previewPaused
     || !displayStatus
     ? "/iris-placeholder.png"
     : piConfigured
@@ -360,11 +364,14 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (!statusReady || previewPaused) {
+      return;
+    }
     setLivePreviewReady(false);
     setSnapshotFailed(false);
     setPreviewMode(preferredPreviewMode);
     setSnapshotNonce(Date.now());
-  }, [preferredPreviewMode, previewSourceKey]);
+  }, [preferredPreviewMode, previewPaused, previewSourceKey, statusReady]);
 
   const handleStreamFallback = useCallback(() => {
     setLivePreviewReady(false);
@@ -422,14 +429,15 @@ export default function App() {
 
   async function handleRunAutoCalibration() {
     setBusy("Auto Calibration");
+    setLivePreviewReady(false);
+    setSnapshotFailed(false);
+    setSnapshotNonce(Date.now());
     appendLog("info", "Auto Calibration started.");
     try {
+      await apiPost<{ ok: boolean }>("/api/pi/preview/stop");
       const next = await startCalibration();
       setCalibration(next);
       appendLog("ok", "Auto Calibration is running in the background.");
-      setPreviewMode(preferredPreviewMode);
-      setSnapshotFailed(false);
-      setSnapshotNonce(Date.now());
     } catch (error) {
       appendLog("error", `Auto Calibration failed: ${errorMessage(error)}`);
     } finally {
@@ -471,6 +479,7 @@ export default function App() {
                 snapshotFailed={snapshotFailed}
                 piConfigured={piConfigured}
                 piWebRTCAvailable={piWebRTCAvailable}
+                previewPaused={previewPaused}
                 nonce={snapshotNonce}
                 sharpnessThreshold={liveSharpnessThreshold}
                 qualityThresholds={qualityThresholds}
@@ -794,6 +803,7 @@ function PreviewPanel({
   snapshotFailed,
   piConfigured,
   piWebRTCAvailable,
+  previewPaused,
   nonce,
   sharpnessThreshold,
   qualityThresholds,
@@ -810,6 +820,7 @@ function PreviewPanel({
   snapshotFailed: boolean;
   piConfigured: boolean;
   piWebRTCAvailable: boolean;
+  previewPaused: boolean;
   nonce: number;
   sharpnessThreshold: number;
   qualityThresholds?: QualityThresholds;
@@ -825,7 +836,7 @@ function PreviewPanel({
   const liveQuality = useLiveQuality({
     imageRef,
     videoRef,
-    enabled: !snapshotFailed,
+    enabled: !snapshotFailed && !previewPaused,
     mode: previewMode,
     nonce,
     thresholds: qualityThresholds,
@@ -833,7 +844,7 @@ function PreviewPanel({
 
   useEffect(() => {
     setWebrtcReady(false);
-    if (!piConfigured || previewMode !== "webrtc" || snapshotFailed) {
+    if (previewPaused || !piConfigured || previewMode !== "webrtc" || snapshotFailed) {
       return undefined;
     }
     let cancelled = false;
@@ -932,13 +943,13 @@ function PreviewPanel({
       }
       pc?.close();
     };
-  }, [nonce, onPreviewReady, onWebRTCFallback, piConfigured, previewMode, snapshotFailed]);
+  }, [nonce, onPreviewReady, onWebRTCFallback, piConfigured, previewMode, previewPaused, snapshotFailed]);
 
   return (
     <div className="preview-panel">
       <PanelTitle icon={<ScanEye size={18} />} title="Live Preview" actionLabel={previewLabel} />
       <div className="preview-frame">
-        {piConfigured && previewMode === "webrtc" && !snapshotFailed ? (
+        {piConfigured && previewMode === "webrtc" && !previewPaused && !snapshotFailed ? (
           <video ref={videoRef} aria-label="Live camera preview" autoPlay muted playsInline />
         ) : (
           <img
@@ -946,7 +957,7 @@ function PreviewPanel({
             src={previewSrc}
             alt="Live camera preview"
             onLoad={() => {
-              if (!snapshotFailed) {
+              if (!snapshotFailed && previewSrc !== "/iris-placeholder.png") {
                 onPreviewReady();
               }
             }}
@@ -959,26 +970,27 @@ function PreviewPanel({
             }}
           />
         )}
-        <button className="icon-button preview-refresh" title="Refresh preview" onClick={onRefreshPreview}>
+        <button className="icon-button preview-refresh" title="Refresh preview" onClick={onRefreshPreview} disabled={previewPaused}>
           <RefreshCw size={17} />
         </button>
         <LiveSharpnessIndicator reading={liveQuality} threshold={sharpnessThreshold} />
       </div>
-      {previewMode === "webrtc" && !snapshotFailed ? (
+      {previewPaused ? <p className="preview-message">Preview paused while auto calibration owns the camera.</p> : null}
+      {previewMode === "webrtc" && !previewPaused && !snapshotFailed ? (
         <p className={webrtcReady ? "preview-message ok" : "preview-message"}>
           {webrtcReady ? "WebRTC preview active." : "Starting WebRTC preview..."}
         </p>
       ) : null}
-      {previewMode === "stream" && !snapshotFailed ? (
+      {previewMode === "stream" && !previewPaused && !snapshotFailed ? (
         <p className="preview-message">
           {piConfigured && !piWebRTCAvailable ? "Using MJPEG preview." : "Using MJPEG preview fallback."}
         </p>
       ) : null}
-      {previewMode === "snapshot" && !snapshotFailed ? (
+      {previewMode === "snapshot" && !previewPaused && !snapshotFailed ? (
         <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
       ) : null}
-      {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
-      <PreviewReadiness previewMode={previewMode} snapshotFailed={snapshotFailed} reading={liveQuality} />
+      {snapshotFailed && !previewPaused ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
+      <PreviewReadiness previewMode={previewMode} previewPaused={previewPaused} snapshotFailed={snapshotFailed} reading={liveQuality} />
       <QualityStrip preprocess={preprocess} liveQuality={liveQuality} />
     </div>
   );
@@ -986,19 +998,21 @@ function PreviewPanel({
 
 function PreviewReadiness({
   previewMode,
+  previewPaused,
   snapshotFailed,
   reading,
 }: {
   previewMode: PreviewMode;
+  previewPaused: boolean;
   snapshotFailed: boolean;
   reading: LiveQualityReading;
 }) {
-  const readiness = previewReadinessCopy(reading, snapshotFailed);
+  const readiness = previewReadinessCopy(reading, snapshotFailed, previewPaused);
   return (
     <div className={`preview-readiness ${readiness.tone}`}>
       <div>
         <span>Transport</span>
-        <strong>{transportLabel(previewMode, snapshotFailed)}</strong>
+        <strong>{transportLabel(previewMode, snapshotFailed, previewPaused)}</strong>
       </div>
       <div>
         <span>Frame</span>
@@ -2371,7 +2385,14 @@ function statusSummary(
   return { tone: "ok" as const, label: "System ready", detail: "Diagnostics available" };
 }
 
-function previewReadinessCopy(reading: LiveQualityReading, snapshotFailed: boolean) {
+function previewReadinessCopy(reading: LiveQualityReading, snapshotFailed: boolean, previewPaused = false) {
+  if (previewPaused) {
+    return {
+      tone: "warn" as const,
+      frame: "paused",
+      guidance: "Auto calibration is using the camera exclusively.",
+    };
+  }
   if (snapshotFailed || reading.tone === "unavailable") {
     return {
       tone: "error" as const,
@@ -2407,7 +2428,10 @@ function previewReadinessCopy(reading: LiveQualityReading, snapshotFailed: boole
   };
 }
 
-function transportLabel(previewMode: PreviewMode, snapshotFailed: boolean) {
+function transportLabel(previewMode: PreviewMode, snapshotFailed: boolean, previewPaused = false) {
+  if (previewPaused) {
+    return "paused";
+  }
   if (snapshotFailed) {
     return "offline";
   }

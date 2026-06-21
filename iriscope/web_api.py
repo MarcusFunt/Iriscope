@@ -65,6 +65,7 @@ WEB_DIST = Path(os.environ.get("IRISCOPE_WEB_DIST", PROJECT_ROOT / "web" / "dist
 ARTIFACT_SUFFIXES = IMAGE_SUFFIXES | {".json", ".html", ".csv", ".txt"}
 MJPEG_BOUNDARY = "iriscope-frame"
 _PREVIEW_LOCK = threading.Lock()
+_PREVIEW_START_LOCK = threading.Lock()
 _ACTIVE_PREVIEW_PROCESS: subprocess.Popen[bytes] | None = None
 _ACTIVE_PREVIEW_PI: PiConfig | None = None
 _LAST_PREVIEW_FRAME: dict[str, Any] | None = None
@@ -74,7 +75,7 @@ _ACTIVE_WEBRTC_TRACKS: set[Any] = set()
 _CALIBRATION_LOCK = threading.Lock()
 _CALIBRATION_JOB: dict[str, Any] | None = None
 HEALTH_STALE_AFTER_S = 15.0
-REMOTE_MJPEG_PREVIEW_PATTERN = "rpicam-vid .*--codec mjpeg .* -o -"
+REMOTE_MJPEG_PREVIEW_PATTERN = "[r]picam-vid .*--codec mjpeg .* -o -"
 
 AwbMode = Literal["auto", "incandescent", "tungsten", "fluorescent", "indoor", "daylight", "cloudy", "custom", "manual"]
 MeteringMode = Literal["centre", "spot", "average", "custom"]
@@ -318,6 +319,8 @@ def create_app() -> FastAPI:
         config = load_config(CONFIG_PATH)
         if not config.pi.host:
             raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
+        if _calibration_job_active():
+            raise HTTPException(status_code=409, detail="Preview is paused while auto calibration is using the camera.")
         try:
             await _stop_pi_preview_transports(config)
             path = await asyncio.to_thread(_capture_pi_snapshot, config)
@@ -330,6 +333,8 @@ def create_app() -> FastAPI:
         config = load_config(CONFIG_PATH)
         if not config.pi.host:
             raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
+        if _calibration_job_active():
+            raise HTTPException(status_code=409, detail="Preview is paused while auto calibration is using the camera.")
         try:
             stream = await asyncio.to_thread(_open_pi_mjpeg_stream, config)
         except Exception as exc:
@@ -344,6 +349,8 @@ def create_app() -> FastAPI:
         config = load_config(CONFIG_PATH)
         if not config.pi.host:
             raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
+        if _calibration_job_active():
+            raise HTTPException(status_code=409, detail="Preview is paused while auto calibration is using the camera.")
         webrtc_available, webrtc_reason = _webrtc_preview_status()
         if not webrtc_available:
             raise HTTPException(status_code=503, detail=webrtc_reason)
@@ -773,6 +780,11 @@ def _calibration_status_payload() -> dict[str, Any]:
 
 def _calibration_job_active_locked() -> bool:
     return bool(_CALIBRATION_JOB and _CALIBRATION_JOB.get("active"))
+
+
+def _calibration_job_active() -> bool:
+    with _CALIBRATION_LOCK:
+        return _calibration_job_active_locked()
 
 
 def _applied_calibration_profile_path() -> Path:
@@ -1659,26 +1671,27 @@ def _open_pi_mjpeg_stream(config) -> Iterator[bytes]:
 
 
 def _start_pi_preview_process(config) -> subprocess.Popen[bytes]:
-    stop_pi_preview()
-    _stop_remote_mjpeg_preview(config.pi)
-    command = build_rpicam_mjpeg_command(config.capture, config.preview)
-    args = _preview_ssh_args(config.pi)
-    args += [config.pi.target, shell_join(command)]
-    try:
-        process = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except Exception:
+    with _PREVIEW_START_LOCK:
         stop_pi_preview()
-        raise
-    with _PREVIEW_LOCK:
-        global _ACTIVE_PREVIEW_PI, _ACTIVE_PREVIEW_PROCESS
-        _ACTIVE_PREVIEW_PROCESS = process
-        _ACTIVE_PREVIEW_PI = config.pi
-    return process
+        _stop_remote_mjpeg_preview(config.pi)
+        command = build_rpicam_mjpeg_command(config.capture, config.preview)
+        args = _preview_ssh_args(config.pi)
+        args += [config.pi.target, shell_join(command)]
+        try:
+            process = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception:
+            stop_pi_preview()
+            raise
+        with _PREVIEW_LOCK:
+            global _ACTIVE_PREVIEW_PI, _ACTIVE_PREVIEW_PROCESS
+            _ACTIVE_PREVIEW_PROCESS = process
+            _ACTIVE_PREVIEW_PI = config.pi
+        return process
 
 
 def _preview_ssh_args(pi: PiConfig) -> list[str]:

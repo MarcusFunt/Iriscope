@@ -108,6 +108,23 @@ def test_pi_stream_endpoint_returns_mjpeg_stream(tmp_path: Path, monkeypatch):
     assert b"--iriscope-frame" in response.content
 
 
+def test_pi_preview_endpoints_reject_while_calibration_active(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    web_api._CALIBRATION_JOB = {"active": True, "job_id": "running"}
+
+    try:
+        snapshot = client.get("/api/pi/snapshot")
+        stream = client.get("/api/pi/stream.mjpeg")
+        webrtc = client.post("/api/pi/webrtc/offer", json={"sdp": "offer-sdp", "type": "offer"})
+    finally:
+        web_api._CALIBRATION_JOB = None
+
+    assert snapshot.status_code == 409
+    assert stream.status_code == 409
+    assert webrtc.status_code == 409
+    assert "calibration" in stream.json()["detail"]
+
+
 def test_pi_webrtc_offer_endpoint_returns_answer(tmp_path: Path, monkeypatch):
     client, _ = _client(tmp_path, monkeypatch)
 
@@ -146,7 +163,7 @@ def test_remote_preview_cleanup_targets_only_mjpeg_preview(monkeypatch):
     web_api._stop_remote_mjpeg_preview(web_api.PiConfig(host="iriscope-pi.local", user="camera"))
 
     assert commands == [
-        ("pkill -f 'rpicam-vid .*--codec mjpeg .* -o -' || true", 5),
+        ("pkill -f '[r]picam-vid .*--codec mjpeg .* -o -' || true", 5),
     ]
 
 
