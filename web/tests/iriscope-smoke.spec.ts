@@ -255,33 +255,36 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.locator(".quality-strip .metric").filter({ hasText: "Focus" }).locator("strong")).toHaveText("0.0");
   await expect(page.locator(".quality-strip .metric").filter({ hasText: "Luma" }).locator("strong")).toHaveText(/\d+\.\d{2}/);
   await expect(page.locator(".quality-strip .metric").filter({ hasText: "Ready" }).locator("strong")).toHaveText("no");
+  await expect(page.getByText("Next action")).toBeVisible();
+  await expect(page.getByText("Camera tuning")).toBeVisible();
   await expect(page.getByLabel("Frames")).toHaveValue("16");
+  await page.getByText("Camera tuning").click();
   await expect(page.getByLabel("Shutter us")).toHaveValue("0");
   await expect(page.getByRole("spinbutton", { name: "Gain" })).toHaveValue("0");
   await expect(page.getByLabel("AWB mode")).toHaveValue("auto");
   await expect(page.getByLabel("AWB red")).toHaveValue("3.2");
 
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.locator("nav").getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByLabel("Save stacked image and iris mask").uncheck();
   await page.getByRole("button", { name: "Save Settings" }).click();
   await expect.poll(() => savedConfig?.processing.save_intermediates).toBe(false);
 
-  await page.getByRole("button", { name: "Label" }).click();
+  await page.locator("nav").getByRole("button", { name: "Label", exact: true }).click();
   await expect(page.getByLabel("Subject code")).toHaveValue("S042");
   await expect(page.getByLabel("Notes")).toHaveValue("existing note");
 
-  await page.getByRole("button", { name: "Preprocess" }).click();
-  await page.getByRole("button", { name: "Inspect Frames" }).click();
+  await page.locator("nav").getByRole("button", { name: "Preprocess", exact: true }).click();
+  await page.getByRole("button", { name: "Inspect Frames", exact: true }).click();
   await expect(page.getByText("Frames are ready for alignment and stacking.")).toBeVisible();
   await expect(page.getByText("42.5").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Process Session" }).click();
+  await page.getByRole("button", { name: "Process Session", exact: true }).click();
   await expect.poll(() => processPayload?.save_intermediates).toBe(false);
   await expect(page.getByRole("img", { name: "Enhanced" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Report JSON" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open Review" })).toBeEnabled();
 
-  await page.getByRole("button", { name: "Label" }).click();
+  await page.locator("nav").getByRole("button", { name: "Label", exact: true }).click();
   await page.getByLabel("Notes").fill("approved for local review");
   await page.getByRole("button", { name: "Save Label" }).click();
   await expect.poll(() => savedLabel?.notes).toBe("approved for local review");

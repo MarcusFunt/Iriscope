@@ -81,6 +81,7 @@ type ProcessedOutputState = {
 type PreviewMode = "webrtc" | "stream" | "snapshot";
 type ActiveView = "capture" | "preprocess" | "label" | "review" | "settings";
 type SharpnessTone = "measuring" | "soft" | "ok" | "sharp" | "unavailable";
+type WorkflowState = "done" | "current" | "waiting";
 
 type LiveQualityReading = {
   score: number | null;
@@ -88,6 +89,14 @@ type LiveQualityReading = {
   clipFraction: number | null;
   ready: boolean | null;
   tone: SharpnessTone;
+};
+
+type WorkflowStep = {
+  key: string;
+  view: ActiveView;
+  label: string;
+  detail: string;
+  state: WorkflowState;
 };
 
 const defaultCapture: CaptureForm = {
@@ -302,6 +311,19 @@ export default function App() {
     };
   }, [processedOutput, selectedRecord, selectedSession]);
   const currentProcessResult = processedOutput?.sessionDir === selectedSession ? processedOutput.result : null;
+  const workflowSteps = useMemo(
+    () =>
+      buildWorkflowSteps({
+        piReady,
+        livePreviewReady,
+        selectedRecord,
+        selectedSession,
+        preprocess,
+        currentProcessResult,
+        label,
+      }),
+    [currentProcessResult, label, livePreviewReady, piReady, preprocess, selectedRecord, selectedSession],
+  );
 
   useEffect(() => {
     setLivePreviewReady(false);
@@ -369,6 +391,7 @@ export default function App() {
       <Sidebar activeView={activeView} onChange={setActiveView} />
       <main className="workspace">
         <TopBar status={displayStatus} serialPort={serialPort} cameraName={cameraName} onRefresh={refresh} />
+        <WorkflowStrip steps={workflowSteps} activeView={activeView} onChange={setActiveView} selectedSession={selectedRecord?.name} />
 
         <section className={`work-grid ${activeView}`} aria-label="Iriscope workstation">
           {activeView === "capture" ? (
@@ -592,26 +615,78 @@ function TopBar({
 }) {
   const moduleCount = status ? Object.values(status.tools.python_modules).filter(Boolean).length : 0;
   const moduleTotal = status ? Object.values(status.tools.python_modules).length : 0;
+  const systemSummary = statusSummary(status, serialPort, cameraName, moduleCount, moduleTotal);
   return (
     <header className="topbar">
       <div>
         <h1>Capture workstation</h1>
         <p>{status?.capture_root ?? "captures"} </p>
       </div>
-      <div className="status-strip">
-        <StatusPill tone={healthTone(status?.health?.ssh)} icon={<Terminal size={16} />} label={`SSH ${healthLabel(status?.health?.ssh)}`} />
-        <StatusPill tone={healthTone(status?.health?.rpicam)} icon={<ScanEye size={16} />} label={`Camera ${healthLabel(status?.health?.rpicam)}`} />
-        <StatusPill tone={healthTone(status?.health?.preview)} icon={<Eye size={16} />} label={`Preview ${healthLabel(status?.health?.preview)}`} />
-        <StatusPill tone={healthTone(status?.health?.disk)} icon={<HardDrive size={16} />} label={`Disk ${diskLabel(status?.health?.disk)}`} />
-        <StatusPill tone={healthTone(status?.health?.windows_pnp)} icon={<CircleAlert size={16} />} label={`PnP ${healthLabel(status?.health?.windows_pnp)}`} />
-        <StatusPill tone={serialPort === "not detected" ? "warn" : "ok"} icon={<Terminal size={16} />} label={serialPort} />
-        <StatusPill tone={cameraName === "no camera" ? "warn" : "ok"} icon={<ScanEye size={16} />} label={cameraName} />
-        <StatusPill tone={moduleCount === moduleTotal ? "ok" : "warn"} icon={<Gauge size={16} />} label={`${moduleCount}/${moduleTotal} deps`} />
+      <div className="topbar-actions">
+        <details className={`diagnostics-summary ${systemSummary.tone}`}>
+          <summary>
+            <Gauge size={16} />
+            <span>
+              <strong>{systemSummary.label}</strong>
+              <small>{systemSummary.detail}</small>
+            </span>
+          </summary>
+          <div className="status-strip">
+            <StatusPill tone={healthTone(status?.health?.ssh)} icon={<Terminal size={16} />} label={`SSH ${healthLabel(status?.health?.ssh)}`} />
+            <StatusPill tone={healthTone(status?.health?.rpicam)} icon={<ScanEye size={16} />} label={`Camera ${healthLabel(status?.health?.rpicam)}`} />
+            <StatusPill tone={healthTone(status?.health?.preview)} icon={<Eye size={16} />} label={`Preview ${healthLabel(status?.health?.preview)}`} />
+            <StatusPill tone={healthTone(status?.health?.disk)} icon={<HardDrive size={16} />} label={`Disk ${diskLabel(status?.health?.disk)}`} />
+            <StatusPill tone={healthTone(status?.health?.windows_pnp)} icon={<CircleAlert size={16} />} label={`PnP ${healthLabel(status?.health?.windows_pnp)}`} />
+            <StatusPill tone={serialPort === "not detected" ? "warn" : "ok"} icon={<Terminal size={16} />} label={serialPort} />
+            <StatusPill tone={cameraName === "no camera" ? "warn" : "ok"} icon={<ScanEye size={16} />} label={cameraName} />
+            <StatusPill tone={moduleCount === moduleTotal ? "ok" : "warn"} icon={<Gauge size={16} />} label={`${moduleCount}/${moduleTotal} deps`} />
+          </div>
+        </details>
         <button className="icon-button" title="Refresh status" onClick={onRefresh}>
           <RefreshCw size={17} />
         </button>
       </div>
     </header>
+  );
+}
+
+function WorkflowStrip({
+  steps,
+  activeView,
+  selectedSession,
+  onChange,
+}: {
+  steps: WorkflowStep[];
+  activeView: ActiveView;
+  selectedSession?: string;
+  onChange: (view: ActiveView) => void;
+}) {
+  const current = steps.find((step) => step.state === "current") ?? steps[0];
+  return (
+    <section className="workflow-strip" aria-label="Capture workflow">
+      <div className="workflow-current">
+        <span>Next action</span>
+        <strong>{current.label}</strong>
+        <small>{selectedSession ? selectedSession : current.detail}</small>
+      </div>
+      <div className="workflow-steps">
+        {steps.map((step, index) => (
+          <button
+            key={step.key}
+            type="button"
+            className={`workflow-step ${step.state} ${activeView === step.view ? "active" : ""}`}
+            onClick={() => onChange(step.view)}
+            aria-current={step.state === "current" ? "step" : undefined}
+          >
+            <span className="workflow-step-index">{step.state === "done" ? <CheckCircle2 size={14} /> : index + 1}</span>
+            <span>
+              <strong>{step.label}</strong>
+              <small>{step.detail}</small>
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -836,7 +911,33 @@ function PreviewPanel({
         <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
       ) : null}
       {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
+      <PreviewReadiness previewMode={previewMode} snapshotFailed={snapshotFailed} reading={liveQuality} />
       <QualityStrip preprocess={preprocess} liveQuality={liveQuality} />
+    </div>
+  );
+}
+
+function PreviewReadiness({
+  previewMode,
+  snapshotFailed,
+  reading,
+}: {
+  previewMode: PreviewMode;
+  snapshotFailed: boolean;
+  reading: LiveQualityReading;
+}) {
+  const readiness = previewReadinessCopy(reading, snapshotFailed);
+  return (
+    <div className={`preview-readiness ${readiness.tone}`}>
+      <div>
+        <span>Transport</span>
+        <strong>{transportLabel(previewMode, snapshotFailed)}</strong>
+      </div>
+      <div>
+        <span>Frame</span>
+        <strong>{readiness.frame}</strong>
+      </div>
+      <p>{readiness.guidance}</p>
     </div>
   );
 }
@@ -1091,7 +1192,21 @@ function CapturePanel({
   return (
     <section className="panel capture-panel">
       <PanelTitle icon={<Activity size={18} />} title="Capture" />
-      <div className="form-grid">
+      <div className="capture-focus-card">
+        <span>{piReady ? "Ready for stack capture" : "Camera not ready"}</span>
+        <strong>{piReady ? `${capture.count} frames, ${capture.eye} eye` : "Check SSH and camera status"}</strong>
+      </div>
+      <div className="button-row action-row">
+        <button className="secondary" onClick={onCalibrate} disabled={busy !== null}>
+          <ListChecks size={17} />
+          Calibrate
+        </button>
+        <button className="primary" onClick={onCapture} disabled={busy !== null || !piReady}>
+          <Play size={17} />
+          Capture Stack
+        </button>
+      </div>
+      <div className="form-grid capture-core-grid">
         <Field label="Subject">
           <input value={capture.subject} onChange={(event) => setCapture({ ...capture, subject: event.target.value })} />
         </Field>
@@ -1108,72 +1223,73 @@ function CapturePanel({
         <Field label="Frames">
           <input type="number" min={1} max={60} value={capture.count} onChange={(event) => setCapture({ ...capture, count: Number(event.target.value) })} />
         </Field>
-        <Field label="Shutter us">
-          <input
-            type="number"
-            min={0}
-            title="0 lets rpicam choose exposure automatically"
-            value={capture.shutter_us}
-            onChange={(event) => setCapture({ ...capture, shutter_us: Number(event.target.value) })}
-          />
-        </Field>
-        <Field label="ISO equiv">
-          <input
-            type="number"
-            min={0}
-            step={50}
-            title="Blank or 0 lets rpicam choose analogue gain automatically"
-            value={capture.gain > 0 ? Math.round(capture.gain * 100) : ""}
-            onChange={(event) => setCapture({ ...capture, gain: event.target.value ? Number(event.target.value) / 100 : 0 })}
-          />
-        </Field>
-        <Field label="Gain">
-          <input
-            type="number"
-            min={0}
-            step="0.1"
-            value={capture.gain}
-            onChange={(event) => setCapture({ ...capture, gain: Number(event.target.value) })}
-          />
-        </Field>
-        <Field label="AWB mode">
-          <select value={capture.awb} onChange={(event) => setCapture({ ...capture, awb: event.target.value as AwbMode })}>
-            {awbModes.map((mode) => (
-              <option value={mode.value} key={mode.value}>
-                {mode.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="AWB red">
-          <input
-            type="number"
-            step="0.1"
-            disabled={capture.awb !== "manual"}
-            value={capture.awb_red}
-            onChange={(event) => setCapture({ ...capture, awb_red: Number(event.target.value) })}
-          />
-        </Field>
-        <Field label="AWB blue">
-          <input
-            type="number"
-            step="0.1"
-            disabled={capture.awb !== "manual"}
-            value={capture.awb_blue}
-            onChange={(event) => setCapture({ ...capture, awb_blue: Number(event.target.value) })}
-          />
-        </Field>
       </div>
-      <div className="button-row">
-        <button className="secondary" onClick={onCalibrate} disabled={busy !== null}>
-          <ListChecks size={17} />
-          Calibrate
-        </button>
-        <button className="primary" onClick={onCapture} disabled={busy !== null || !piReady}>
-          <Play size={17} />
-          Capture Stack
-        </button>
-      </div>
+      <details className="advanced-controls">
+        <summary>
+          <SlidersHorizontal size={16} />
+          <span>
+            <strong>Camera tuning</strong>
+            <small>Shutter, gain, white balance</small>
+          </span>
+        </summary>
+        <div className="form-grid">
+          <Field label="Shutter us">
+            <input
+              type="number"
+              min={0}
+              title="0 lets rpicam choose exposure automatically"
+              value={capture.shutter_us}
+              onChange={(event) => setCapture({ ...capture, shutter_us: Number(event.target.value) })}
+            />
+          </Field>
+          <Field label="ISO equiv">
+            <input
+              type="number"
+              min={0}
+              step={50}
+              title="Blank or 0 lets rpicam choose analogue gain automatically"
+              value={capture.gain > 0 ? Math.round(capture.gain * 100) : ""}
+              onChange={(event) => setCapture({ ...capture, gain: event.target.value ? Number(event.target.value) / 100 : 0 })}
+            />
+          </Field>
+          <Field label="Gain">
+            <input
+              type="number"
+              min={0}
+              step="0.1"
+              value={capture.gain}
+              onChange={(event) => setCapture({ ...capture, gain: Number(event.target.value) })}
+            />
+          </Field>
+          <Field label="AWB mode">
+            <select value={capture.awb} onChange={(event) => setCapture({ ...capture, awb: event.target.value as AwbMode })}>
+              {awbModes.map((mode) => (
+                <option value={mode.value} key={mode.value}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="AWB red">
+            <input
+              type="number"
+              step="0.1"
+              disabled={capture.awb !== "manual"}
+              value={capture.awb_red}
+              onChange={(event) => setCapture({ ...capture, awb_red: Number(event.target.value) })}
+            />
+          </Field>
+          <Field label="AWB blue">
+            <input
+              type="number"
+              step="0.1"
+              disabled={capture.awb !== "manual"}
+              value={capture.awb_blue}
+              onChange={(event) => setCapture({ ...capture, awb_blue: Number(event.target.value) })}
+            />
+          </Field>
+        </div>
+      </details>
     </section>
   );
 }
@@ -1218,6 +1334,16 @@ function PreprocessPanel({
           <li key={item}>{item}</li>
         ))}
       </ul>
+      <div className="button-row action-row">
+        <button className="secondary" onClick={onPreprocess} disabled={busy !== null || !sessionDir}>
+          <RefreshCw size={17} />
+          Inspect Frames
+        </button>
+        <button className="primary" onClick={onProcess} disabled={busy !== null || !sessionDir}>
+          <Sparkles size={17} />
+          Process Session
+        </button>
+      </div>
       <div className="form-grid process-controls">
         <Field label="Stack method">
           <select
@@ -1276,16 +1402,6 @@ function PreprocessPanel({
         />
         Save stacked image and iris mask
       </label>
-      <div className="button-row">
-        <button className="secondary" onClick={onPreprocess} disabled={busy !== null || !sessionDir}>
-          <RefreshCw size={17} />
-          Inspect Frames
-        </button>
-        <button className="primary" onClick={onProcess} disabled={busy !== null || !sessionDir}>
-          <Sparkles size={17} />
-          Process Session
-        </button>
-      </div>
     </section>
   );
 }
@@ -1779,9 +1895,16 @@ function SessionRail({
 }
 
 function LogPanel({ logs }: { logs: LogItem[] }) {
+  const latestWarning = logs.find((item) => item.level === "warn" || item.level === "error");
   return (
-    <section className="panel log-panel">
-      <PanelTitle icon={<Terminal size={18} />} title="Run Log" />
+    <details className="panel log-panel">
+      <summary className="log-summary">
+        <span>
+          <Terminal size={18} />
+          <strong>Run Log</strong>
+        </span>
+        <small>{latestWarning ? latestWarning.message : `${logs.length} events`}</small>
+      </summary>
       <div className="logs">
         {logs.map((item) => (
           <div className={`log-line ${item.level}`} key={item.id}>
@@ -1790,7 +1913,7 @@ function LogPanel({ logs }: { logs: LogItem[] }) {
           </div>
         ))}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -1832,6 +1955,165 @@ function QualityStrip({
 
 function liveMetricPlaceholder(reading: LiveQualityReading) {
   return reading.tone === "unavailable" ? "-" : "measuring";
+}
+
+function buildWorkflowSteps({
+  piReady,
+  livePreviewReady,
+  selectedRecord,
+  selectedSession,
+  preprocess,
+  currentProcessResult,
+  label,
+}: {
+  piReady: boolean;
+  livePreviewReady: boolean;
+  selectedRecord: SessionRecord | undefined;
+  selectedSession: string;
+  preprocess: PreprocessReport | null;
+  currentProcessResult: ProcessResponse | null;
+  label: LabelRecord;
+}): WorkflowStep[] {
+  const hasSession = Boolean(selectedSession || selectedRecord);
+  const preprocessed = Boolean(preprocess || selectedRecord?.preprocessed);
+  const processed = Boolean(currentProcessResult || selectedRecord?.processed);
+  const labeled = Boolean(selectedRecord?.labeled || label.updated_at || label.consent_recorded);
+  const previewReady = piReady && livePreviewReady;
+  const currentKey = !previewReady
+    ? "preview"
+    : !hasSession
+      ? "capture"
+      : !preprocessed
+        ? "inspect"
+        : !processed
+          ? "process"
+          : !labeled
+            ? "label"
+            : "review";
+
+  const rawSteps = [
+    {
+      key: "preview",
+      view: "capture" as ActiveView,
+      label: "Preview ready",
+      detail: previewReady ? "Focus and exposure visible" : "Confirm camera feed",
+    },
+    {
+      key: "capture",
+      view: "capture" as ActiveView,
+      label: "Capture stack",
+      detail: hasSession ? "Session selected" : "Create a frame stack",
+    },
+    {
+      key: "inspect",
+      view: "preprocess" as ActiveView,
+      label: "Inspect frames",
+      detail: preprocessed ? "Frame checks complete" : "Check focus and mask",
+    },
+    {
+      key: "process",
+      view: "preprocess" as ActiveView,
+      label: "Process output",
+      detail: processed ? "Enhanced output ready" : "Stack and enhance",
+    },
+    {
+      key: "label",
+      view: "label" as ActiveView,
+      label: "Govern labels",
+      detail: labeled ? "Label saved" : "Consent and use metadata",
+    },
+    {
+      key: "review",
+      view: "review" as ActiveView,
+      label: "Review export",
+      detail: processed ? "Open artifacts" : "Needs processed output",
+    },
+  ];
+  const currentIndex = rawSteps.findIndex((step) => step.key === currentKey);
+  return rawSteps.map((step, index) => ({
+    ...step,
+    state: index < currentIndex ? "done" : index === currentIndex ? "current" : "waiting",
+  }));
+}
+
+function statusSummary(
+  status: StatusResponse | null,
+  serialPort: string,
+  cameraName: string,
+  moduleCount: number,
+  moduleTotal: number,
+) {
+  if (!status) {
+    return { tone: "warn" as const, label: "Checking system", detail: "Status pending" };
+  }
+  const checks: Array<"ok" | "warn" | "error"> = [
+    healthTone(status.health?.ssh),
+    healthTone(status.health?.rpicam),
+    healthTone(status.health?.preview),
+    healthTone(status.health?.disk),
+    healthTone(status.health?.windows_pnp),
+    serialPort === "not detected" ? "warn" : "ok",
+    cameraName === "no camera" ? "warn" : "ok",
+    moduleCount === moduleTotal ? "ok" : "warn",
+  ];
+  const errors = checks.filter((tone) => tone === "error").length;
+  const warnings = checks.filter((tone) => tone === "warn").length;
+  if (errors > 0) {
+    return { tone: "error" as const, label: `${errors} system issue${errors === 1 ? "" : "s"}`, detail: "Open diagnostics" };
+  }
+  if (warnings > 0) {
+    return { tone: "warn" as const, label: `${warnings} item${warnings === 1 ? "" : "s"} to check`, detail: "Open diagnostics" };
+  }
+  return { tone: "ok" as const, label: "System ready", detail: "Diagnostics available" };
+}
+
+function previewReadinessCopy(reading: LiveQualityReading, snapshotFailed: boolean) {
+  if (snapshotFailed || reading.tone === "unavailable") {
+    return {
+      tone: "error" as const,
+      frame: "unavailable",
+      guidance: "Refresh the preview after checking Pi power, SSH, and camera ownership.",
+    };
+  }
+  if (reading.tone === "measuring") {
+    return {
+      tone: "warn" as const,
+      frame: "measuring",
+      guidance: "Hold the subject steady while Iriscope samples focus and exposure.",
+    };
+  }
+  if (reading.ready) {
+    return {
+      tone: "ok" as const,
+      frame: "ready",
+      guidance: "Focus, luminance, and clipping are within the configured capture thresholds.",
+    };
+  }
+  if (reading.tone === "soft") {
+    return {
+      tone: "warn" as const,
+      frame: "soft focus",
+      guidance: "Refocus the lens or stabilize the head support before capturing the stack.",
+    };
+  }
+  return {
+    tone: "warn" as const,
+    frame: "review",
+    guidance: "Check luma and clipping before capture; the frame is close but not fully ready.",
+  };
+}
+
+function transportLabel(previewMode: PreviewMode, snapshotFailed: boolean) {
+  if (snapshotFailed) {
+    return "offline";
+  }
+  if (previewMode === "webrtc") {
+    return "WebRTC";
+  }
+  if (previewMode === "stream") {
+    return "MJPEG";
+  }
+  return "still";
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
