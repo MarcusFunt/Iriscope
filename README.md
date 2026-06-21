@@ -150,6 +150,8 @@ docker compose -f docker-compose.yml -f docker-compose.ssh.yml up -d --build
 
 Open `http://127.0.0.1:8765`. Captures are persisted under the local `captures/` folder, and `.iriscope.toml` is mounted as the container config file. Docker binds to `127.0.0.1` by default; set `IRISCOPE_BIND_ADDRESS` and `IRISCOPE_ADMIN_TOKEN` before exposing it on a shared network. Docker-specific environment variables such as `IRISCOPE_PI_HOST`, `IRISCOPE_PI_USER`, and `IRISCOPE_PI_SSH_KEY` override the mounted TOML at runtime.
 
+Docker uses the MJPEG preview transport by default. WebRTC relies on dynamic UDP ICE candidates, which Docker Desktop does not expose through the single HTTP port mapping, so the app starts MJPEG directly instead of attempting WebRTC and falling back. Set `IRISCOPE_WEBRTC_ENABLED=true` only when the container is running with host networking or another relay setup that makes WebRTC ICE candidates reachable.
+
 To stop the container:
 
 ```powershell
@@ -184,7 +186,7 @@ The watchdog intentionally discards local edits in the deployed checkout so it m
 The GUI provides:
 
 - local device/dependency status, including COM port, UVC camera, SSH config, and Python dependencies
-- live Pi HQ camera preview over WebRTC, fed by `rpicam-vid` over SSH, with MJPEG and still snapshot fallbacks
+- live Pi HQ camera preview fed by `rpicam-vid` over SSH, using WebRTC when available and MJPEG/still snapshot fallbacks otherwise
 - UVC preview snapshots for a directly attached USB camera when no Pi host is configured
 - capture controls for subject, eye, frame count, shutter, gain/ISO equivalent, AWB mode/gains, metering, exposure, and tuning file
 - pre-processing inspection that writes `preprocess_report.json`

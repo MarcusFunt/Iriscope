@@ -50,6 +50,7 @@ import type {
   PreprocessReport,
   ProcessOptions,
   ProcessResponse,
+  QualityThresholds,
   SessionRecord,
   StatusResponse,
 } from "./types";
@@ -81,8 +82,11 @@ type PreviewMode = "webrtc" | "stream" | "snapshot";
 type ActiveView = "capture" | "preprocess" | "label" | "review" | "settings";
 type SharpnessTone = "measuring" | "soft" | "ok" | "sharp" | "unavailable";
 
-type SharpnessReading = {
+type LiveQualityReading = {
   score: number | null;
+  meanLuma: number | null;
+  clipFraction: number | null;
+  ready: boolean | null;
   tone: SharpnessTone;
 };
 
@@ -258,10 +262,17 @@ export default function App() {
   }, [displayStatus]);
 
   const piConfigured = Boolean(displayStatus?.config.pi_host);
+  const piWebRTCAvailable = displayStatus?.config.preview.webrtc_available !== false;
+  const preferredPreviewMode: PreviewMode = piConfigured
+    ? piWebRTCAvailable
+      ? "webrtc"
+      : "stream"
+    : "snapshot";
   const piReady = Boolean(displayStatus?.health?.ssh?.ok && displayStatus?.health?.rpicam?.ok);
   const previewLabel = piConfigured ? "Pi HQ camera" : cameraName;
   const previewSourceKey = piConfigured ? `pi:${displayStatus?.config.pi_host ?? ""}` : `uvc:${cameraName}`;
-  const liveSharpnessThreshold = displayStatus?.config.processing.quality.min_median_focus ?? 10;
+  const qualityThresholds = displayStatus?.config.processing.quality;
+  const liveSharpnessThreshold = qualityThresholds?.min_median_focus ?? 10;
   const previewSrc = snapshotFailed
     || !displayStatus
     ? "/iris-placeholder.png"
@@ -295,9 +306,9 @@ export default function App() {
   useEffect(() => {
     setLivePreviewReady(false);
     setSnapshotFailed(false);
-    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+    setPreviewMode(preferredPreviewMode);
     setSnapshotNonce(Date.now());
-  }, [piConfigured, previewSourceKey]);
+  }, [preferredPreviewMode, previewSourceKey]);
 
   const handleStreamFallback = useCallback(() => {
     setLivePreviewReady(false);
@@ -334,9 +345,9 @@ export default function App() {
 
   const handleRefreshPreview = useCallback(() => {
     setSnapshotFailed(false);
-    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+    setPreviewMode(preferredPreviewMode);
     setSnapshotNonce(Date.now());
-  }, [piConfigured]);
+  }, [preferredPreviewMode]);
 
   async function runAction<T>(name: string, action: () => Promise<T>, onSuccess?: (result: T) => void) {
     setBusy(name);
@@ -369,8 +380,10 @@ export default function App() {
                 previewMode={previewMode}
                 snapshotFailed={snapshotFailed}
                 piConfigured={piConfigured}
+                piWebRTCAvailable={piWebRTCAvailable}
                 nonce={snapshotNonce}
                 sharpnessThreshold={liveSharpnessThreshold}
+                qualityThresholds={qualityThresholds}
                 onStreamFallback={handleStreamFallback}
                 onWebRTCFallback={handleWebRTCFallback}
                 onPreviewFailed={handlePreviewFailed}
@@ -385,7 +398,7 @@ export default function App() {
                 onCalibrate={() =>
                   runAction("Calibration", () => apiPost("/api/calibrate"), (result) => {
                     appendLog("info", JSON.stringify(result));
-                    setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+                    setPreviewMode(preferredPreviewMode);
                     setSnapshotFailed(false);
                     setSnapshotNonce(Date.now());
                   })
@@ -400,7 +413,7 @@ export default function App() {
                         awb_blue: capture.awb === "manual" ? capture.awb_blue : null,
                       }),
                     () => {
-                      setPreviewMode(piConfigured ? "webrtc" : "snapshot");
+                      setPreviewMode(preferredPreviewMode);
                       setSnapshotFailed(false);
                       setSnapshotNonce(Date.now());
                     },
@@ -638,8 +651,10 @@ function PreviewPanel({
   previewMode,
   snapshotFailed,
   piConfigured,
+  piWebRTCAvailable,
   nonce,
   sharpnessThreshold,
+  qualityThresholds,
   onStreamFallback,
   onWebRTCFallback,
   onPreviewFailed,
@@ -652,8 +667,10 @@ function PreviewPanel({
   previewMode: PreviewMode;
   snapshotFailed: boolean;
   piConfigured: boolean;
+  piWebRTCAvailable: boolean;
   nonce: number;
   sharpnessThreshold: number;
+  qualityThresholds?: QualityThresholds;
   onStreamFallback: () => void;
   onWebRTCFallback: (message: string) => void;
   onPreviewFailed: () => void;
@@ -663,13 +680,13 @@ function PreviewPanel({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const [webrtcReady, setWebrtcReady] = useState(false);
-  const sharpness = useLiveSharpness({
+  const liveQuality = useLiveQuality({
     imageRef,
     videoRef,
     enabled: !snapshotFailed,
     mode: previewMode,
     nonce,
-    threshold: sharpnessThreshold,
+    thresholds: qualityThresholds,
   });
 
   useEffect(() => {
@@ -786,6 +803,11 @@ function PreviewPanel({
             ref={imageRef}
             src={previewSrc}
             alt="Live camera preview"
+            onLoad={() => {
+              if (!snapshotFailed) {
+                onPreviewReady();
+              }
+            }}
             onError={() => {
               if (piConfigured && previewMode === "stream") {
                 onStreamFallback();
@@ -798,64 +820,74 @@ function PreviewPanel({
         <button className="icon-button preview-refresh" title="Refresh preview" onClick={onRefreshPreview}>
           <RefreshCw size={17} />
         </button>
-        <LiveSharpnessIndicator reading={sharpness} threshold={sharpnessThreshold} />
+        <LiveSharpnessIndicator reading={liveQuality} threshold={sharpnessThreshold} />
       </div>
       {previewMode === "webrtc" && !snapshotFailed ? (
         <p className={webrtcReady ? "preview-message ok" : "preview-message"}>
           {webrtcReady ? "WebRTC preview active." : "Starting WebRTC preview..."}
         </p>
       ) : null}
-      {previewMode === "stream" && !snapshotFailed ? <p className="preview-message">Using MJPEG preview fallback.</p> : null}
+      {previewMode === "stream" && !snapshotFailed ? (
+        <p className="preview-message">
+          {piConfigured && !piWebRTCAvailable ? "Using MJPEG preview." : "Using MJPEG preview fallback."}
+        </p>
+      ) : null}
       {previewMode === "snapshot" && !snapshotFailed ? (
         <p className="preview-message">Live stream unavailable. Showing still preview fallback.</p>
       ) : null}
       {snapshotFailed ? <p className="preview-message">Preview unavailable. Check Pi SSH key access and refresh.</p> : null}
-      <QualityStrip preprocess={preprocess} />
+      <QualityStrip preprocess={preprocess} liveQuality={liveQuality} />
     </div>
   );
 }
 
-function useLiveSharpness({
+function useLiveQuality({
   imageRef,
   videoRef,
   enabled,
   mode,
   nonce,
-  threshold,
+  thresholds,
 }: {
   imageRef: React.RefObject<HTMLImageElement | null>;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   enabled: boolean;
   mode: PreviewMode;
   nonce: number;
-  threshold: number;
+  thresholds?: QualityThresholds;
 }) {
-  const [reading, setReading] = useState<SharpnessReading>({ score: null, tone: "measuring" });
+  const [reading, setReading] = useState<LiveQualityReading>({
+    score: null,
+    meanLuma: null,
+    clipFraction: null,
+    ready: null,
+    tone: "measuring",
+  });
 
   useEffect(() => {
     if (!enabled) {
-      setReading({ score: null, tone: "unavailable" });
+      setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "unavailable" });
       return undefined;
     }
 
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) {
-      setReading({ score: null, tone: "unavailable" });
+      setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "unavailable" });
       return undefined;
     }
 
     const sample = () => {
       const source = currentPreviewSource(mode, videoRef.current, imageRef.current);
       if (!source) {
-        setReading({ score: null, tone: "measuring" });
+        setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "measuring" });
         return;
       }
 
       try {
         const dimensions = previewSourceDimensions(source);
         if (!dimensions) {
-          setReading({ score: null, tone: "measuring" });
+          setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "measuring" });
           return;
         }
         const maxEdge = 320;
@@ -864,26 +896,30 @@ function useLiveSharpness({
         canvas.height = Math.max(1, Math.round(dimensions.height * scale));
         context.drawImage(source, 0, 0, canvas.width, canvas.height);
         const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-        const score = laplacianVariance(imageData.data, canvas.width, canvas.height);
-        setReading({ score, tone: sharpnessTone(score, threshold) });
+        const frameQuality = liveQualityFromImageData(imageData.data, canvas.width, canvas.height);
+        setReading({
+          ...frameQuality,
+          ready: liveQualityReady(frameQuality, thresholds),
+          tone: sharpnessTone(frameQuality.score, thresholds?.min_median_focus ?? 10),
+        });
       } catch {
-        setReading({ score: null, tone: "unavailable" });
+        setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "unavailable" });
       }
     };
 
-    setReading({ score: null, tone: "measuring" });
+    setReading({ score: null, meanLuma: null, clipFraction: null, ready: null, tone: "measuring" });
     sample();
     const interval = window.setInterval(sample, mode === "snapshot" ? 2000 : 750);
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [enabled, imageRef, mode, nonce, threshold, videoRef]);
+  }, [enabled, imageRef, mode, nonce, thresholds, videoRef]);
 
   return reading;
 }
 
-function LiveSharpnessIndicator({ reading, threshold }: { reading: SharpnessReading; threshold: number }) {
+function LiveSharpnessIndicator({ reading, threshold }: { reading: LiveQualityReading; threshold: number }) {
   const scoreLabel = reading.score === null ? "--" : formatSharpnessScore(reading.score);
   const meterWidth = reading.score === null ? 0 : Math.min(100, (reading.score / Math.max(threshold * 3, 1)) * 100);
 
@@ -909,7 +945,7 @@ function currentPreviewSource(
   if (mode === "webrtc") {
     return video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 ? video : null;
   }
-  return image && image.complete && image.naturalWidth > 0 ? image : null;
+  return image && image.naturalWidth > 0 && image.naturalHeight > 0 ? image : null;
 }
 
 function previewSourceDimensions(source: HTMLVideoElement | HTMLImageElement) {
@@ -919,14 +955,31 @@ function previewSourceDimensions(source: HTMLVideoElement | HTMLImageElement) {
   return source.naturalWidth && source.naturalHeight ? { width: source.naturalWidth, height: source.naturalHeight } : null;
 }
 
-function laplacianVariance(data: Uint8ClampedArray, width: number, height: number) {
-  if (width < 3 || height < 3) {
-    return 0;
+function liveQualityFromImageData(data: Uint8ClampedArray, width: number, height: number) {
+  const pixelCount = Math.max(1, width * height);
+  const gray = new Float32Array(width * height);
+  let lumaSum = 0;
+  let clippedPixels = 0;
+  for (let pixel = 0, grayIndex = 0; pixel < data.length; pixel += 4, grayIndex += 1) {
+    const luma = data[pixel] * 0.299 + data[pixel + 1] * 0.587 + data[pixel + 2] * 0.114;
+    const normalizedLuma = luma / 255;
+    gray[grayIndex] = luma;
+    lumaSum += normalizedLuma;
+    if (normalizedLuma <= 0.002 || normalizedLuma >= 0.998) {
+      clippedPixels += 1;
+    }
   }
 
-  const gray = new Float32Array(width * height);
-  for (let pixel = 0, grayIndex = 0; pixel < data.length; pixel += 4, grayIndex += 1) {
-    gray[grayIndex] = data[pixel] * 0.299 + data[pixel + 1] * 0.587 + data[pixel + 2] * 0.114;
+  return {
+    score: laplacianVariance(gray, width, height),
+    meanLuma: lumaSum / pixelCount,
+    clipFraction: clippedPixels / pixelCount,
+  };
+}
+
+function laplacianVariance(gray: Float32Array, width: number, height: number) {
+  if (width < 3 || height < 3) {
+    return 0;
   }
 
   let count = 0;
@@ -944,6 +997,21 @@ function laplacianVariance(data: Uint8ClampedArray, width: number, height: numbe
 
   const mean = sum / count;
   return Math.max(0, sumSquares / count - mean * mean);
+}
+
+function liveQualityReady(
+  reading: { score: number; meanLuma: number; clipFraction: number },
+  thresholds?: QualityThresholds,
+) {
+  return (
+    reading.score >= (thresholds?.min_median_focus ?? 10) &&
+    thresholdsValueInRange(reading.meanLuma, thresholds?.min_mean_luma ?? 0.02, thresholds?.max_mean_luma ?? 0.98) &&
+    reading.clipFraction <= (thresholds?.max_clip_fraction ?? 0.2)
+  );
+}
+
+function thresholdsValueInRange(value: number, min: number, max: number) {
+  return min <= value && value <= max;
 }
 
 function sharpnessTone(score: number, threshold: number): SharpnessTone {
@@ -1726,14 +1794,44 @@ function LogPanel({ logs }: { logs: LogItem[] }) {
   );
 }
 
-function QualityStrip({ preprocess }: { preprocess: PreprocessReport | null }) {
+function QualityStrip({
+  preprocess,
+  liveQuality,
+}: {
+  preprocess: PreprocessReport | null;
+  liveQuality: LiveQualityReading;
+}) {
+  const focusValue = liveQuality.score !== null
+    ? formatSharpnessScore(liveQuality.score)
+    : preprocess
+      ? preprocess.summary.focus_score_median.toFixed(1)
+      : liveMetricPlaceholder(liveQuality);
+  const lumaValue = liveQuality.meanLuma !== null
+    ? liveQuality.meanLuma.toFixed(2)
+    : preprocess
+      ? preprocess.summary.mean_luma_median.toFixed(2)
+      : liveMetricPlaceholder(liveQuality);
+  const readyValue = liveQuality.ready !== null
+    ? liveQuality.ready
+      ? "yes"
+      : "no"
+    : preprocess
+      ? preprocess.summary.ready_for_stack
+        ? "yes"
+        : "no"
+      : liveMetricPlaceholder(liveQuality);
+
   return (
     <div className="quality-strip">
-      <Metric label="Focus" value={preprocess ? preprocess.summary.focus_score_median.toFixed(1) : "pending"} />
-      <Metric label="Luma" value={preprocess ? preprocess.summary.mean_luma_median.toFixed(2) : "pending"} />
-      <Metric label="Ready" value={preprocess?.summary.ready_for_stack ? "yes" : "no"} />
+      <Metric label="Focus" value={focusValue} />
+      <Metric label="Luma" value={lumaValue} />
+      <Metric label="Ready" value={readyValue} />
     </div>
   );
+}
+
+function liveMetricPlaceholder(reading: LiveQualityReading) {
+  return reading.tone === "unavailable" ? "-" : "measuring";
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

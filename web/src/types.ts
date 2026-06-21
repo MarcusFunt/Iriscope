@@ -44,6 +44,8 @@ export type PreviewSettings = {
   stream_timeout_s: number;
   command_preview: string;
   media_type: string;
+  webrtc_available?: boolean;
+  webrtc_reason?: string;
 };
 
 export type ProcessingSettings = {

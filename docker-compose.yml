@@ -15,6 +15,7 @@ services:
       IRISCOPE_CONFIG_PATH: /config/.iriscope.toml
       IRISCOPE_CAPTURES_ROOT: /data/captures
       IRISCOPE_WEB_DIST: /app/web/dist
+      IRISCOPE_DOCKER: "1"
     volumes:
       - ./captures:/data/captures
       - type: bind

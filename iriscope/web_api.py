@@ -307,6 +307,9 @@ def create_app() -> FastAPI:
         config = load_config(CONFIG_PATH)
         if not config.pi.host:
             raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
+        webrtc_available, webrtc_reason = _webrtc_preview_status()
+        if not webrtc_available:
+            raise HTTPException(status_code=503, detail=webrtc_reason)
         try:
             await _stop_pi_preview_transports(config)
             answer = await _create_webrtc_answer(config, request.sdp, request.type)
@@ -942,10 +945,39 @@ def _capture_dict(settings: CaptureSettings) -> dict[str, Any]:
 
 
 def _preview_dict(capture_settings: CaptureSettings, preview_settings: PreviewSettings) -> dict[str, Any]:
+    webrtc_available, webrtc_reason = _webrtc_preview_status()
     data = asdict(preview_settings)
     data["command_preview"] = " ".join(build_rpicam_mjpeg_command(capture_settings, preview_settings))
     data["media_type"] = f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}"
+    data["webrtc_available"] = webrtc_available
+    data["webrtc_reason"] = webrtc_reason
     return data
+
+
+def _webrtc_preview_status() -> tuple[bool, str]:
+    enabled = _env_bool("IRISCOPE_WEBRTC_ENABLED")
+    if enabled is not None:
+        if enabled:
+            return True, "WebRTC preview enabled by IRISCOPE_WEBRTC_ENABLED."
+        return False, "WebRTC preview disabled by IRISCOPE_WEBRTC_ENABLED; using MJPEG preview."
+    if _env_bool("IRISCOPE_DOCKER") is True:
+        return (
+            False,
+            "WebRTC preview disabled in Docker by default because ICE media candidates are not reachable through the HTTP port mapping; using MJPEG preview.",
+        )
+    return True, "WebRTC preview enabled."
+
+
+def _env_bool(name: str) -> bool | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    clean = value.strip().lower()
+    if clean in {"1", "true", "yes", "on"}:
+        return True
+    if clean in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _tool_status() -> dict[str, Any]:

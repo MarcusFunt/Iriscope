@@ -25,6 +25,7 @@ def test_status_reads_config_from_anchored_project_root(tmp_path: Path, monkeypa
     assert payload["config"]["capture"]["awb_gains"] == [2.0, 1.2]
     assert payload["config"]["preview"]["width"] == 640
     assert "rpicam-vid" in payload["config"]["preview"]["command_preview"]
+    assert payload["config"]["preview"]["webrtc_available"] is True
     assert payload["health"]["ssh"]["status"] == "test"
     assert payload["capture_root"] == str(tmp_path / "captures")
 
@@ -118,6 +119,18 @@ def test_pi_webrtc_offer_endpoint_returns_answer(tmp_path: Path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["sdp"] == "answer-sdp"
     assert response.json()["type"] == "answer"
+
+
+def test_pi_webrtc_offer_endpoint_rejects_when_webrtc_disabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("IRISCOPE_WEBRTC_ENABLED", "false")
+    client, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/pi/webrtc/offer", json={"sdp": "offer-sdp", "type": "offer"})
+    status_response = client.get("/api/status")
+
+    assert response.status_code == 503
+    assert "disabled" in response.json()["detail"]
+    assert status_response.json()["config"]["preview"]["webrtc_available"] is False
 
 
 def test_remote_preview_cleanup_targets_only_mjpeg_preview(monkeypatch):

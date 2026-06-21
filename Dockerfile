@@ -12,7 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     IRISCOPE_PROJECT_ROOT=/app \
     IRISCOPE_CAPTURES_ROOT=/data/captures \
-    IRISCOPE_WEB_DIST=/app/web/dist
+    IRISCOPE_WEB_DIST=/app/web/dist \
+    IRISCOPE_DOCKER=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
