@@ -21,11 +21,14 @@ import {
   Sparkles,
   Tag,
   Terminal,
+  Undo2,
 } from "lucide-react";
 import {
   apiPost,
+  applyCalibration,
   artifactUrl,
   createPiWebRTCAnswer,
+  getCalibrationStatus,
   getConfig,
   getLabel,
   getSessions,
@@ -38,9 +41,12 @@ import {
   saveLabel,
   saveConfig,
   snapshotUrl,
+  startCalibration,
+  revertCalibration,
 } from "./api";
 import type {
   AwbMode,
+  CalibrationStatus,
   ConfigPayload,
   ExposureMode,
   HdrMode,
@@ -98,6 +104,15 @@ type WorkflowStep = {
   detail: string;
   state: WorkflowState;
 };
+
+const calibrationPhases = [
+  { key: "precheck", label: "Precheck" },
+  { key: "auto_baseline", label: "Auto baseline" },
+  { key: "exposure_sweep", label: "Exposure sweep" },
+  { key: "awb_lock_test", label: "AWB lock" },
+  { key: "focus_geometry_check", label: "Focus check" },
+  { key: "recommendation", label: "Recommendation" },
+];
 
 const defaultCapture: CaptureForm = {
   subject: "S001",
@@ -191,6 +206,7 @@ export default function App() {
   const [processOptions, setProcessOptions] = useState<ProcessOptions>(defaultProcessOptions);
   const [preprocess, setPreprocess] = useState<PreprocessReport | null>(null);
   const [processedOutput, setProcessedOutput] = useState<ProcessedOutputState | null>(null);
+  const [calibration, setCalibration] = useState<CalibrationStatus | null>(null);
   const [logs, setLogs] = useState<LogItem[]>([
     { id: logId(), time: now(), level: "info", message: "Iriscope host interface ready." },
   ]);
@@ -206,9 +222,15 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextStatus, nextSessions, nextConfig] = await Promise.all([getStatus(), getSessions(), getConfig()]);
+      const [nextStatus, nextSessions, nextConfig, nextCalibration] = await Promise.all([
+        getStatus(),
+        getSessions(),
+        getConfig(),
+        getCalibrationStatus(),
+      ]);
       setStatus(nextStatus);
       setSessions(nextSessions);
+      setCalibration(nextCalibration);
       if (!captureHydrated) {
         setCapture(captureFromConfig(nextConfig.config));
         setCaptureHydrated(true);
@@ -232,6 +254,18 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!calibration?.active) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void getCalibrationStatus()
+        .then(setCalibration)
+        .catch((error) => appendLog("warn", `Calibration status failed: ${errorMessage(error)}`));
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [appendLog, calibration?.active]);
 
   useEffect(() => {
     const listedSession = sessions.some((session) => session.path === selectedSession);
@@ -386,6 +420,39 @@ export default function App() {
     }
   }
 
+  async function handleRunAutoCalibration() {
+    setBusy("Auto Calibration");
+    appendLog("info", "Auto Calibration started.");
+    try {
+      const next = await startCalibration();
+      setCalibration(next);
+      appendLog("ok", "Auto Calibration is running in the background.");
+      setPreviewMode(preferredPreviewMode);
+      setSnapshotFailed(false);
+      setSnapshotNonce(Date.now());
+    } catch (error) {
+      appendLog("error", `Auto Calibration failed: ${errorMessage(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleApplyCalibration() {
+    await runAction("Apply Calibration", applyCalibration, () => {
+      setPreviewMode(preferredPreviewMode);
+      setSnapshotFailed(false);
+      setSnapshotNonce(Date.now());
+    });
+  }
+
+  async function handleRevertCalibration() {
+    await runAction("Revert Calibration", revertCalibration, () => {
+      setPreviewMode(preferredPreviewMode);
+      setSnapshotFailed(false);
+      setSnapshotNonce(Date.now());
+    });
+  }
+
   return (
     <div className="app-shell">
       <Sidebar activeView={activeView} onChange={setActiveView} />
@@ -413,19 +480,19 @@ export default function App() {
                 onPreviewReady={handlePreviewReady}
                 onRefreshPreview={handleRefreshPreview}
               />
+              <CalibrationPanel
+                calibration={calibration}
+                busy={busy}
+                piReady={piReady}
+                onRun={() => void handleRunAutoCalibration()}
+                onApply={() => void handleApplyCalibration()}
+                onRevert={() => void handleRevertCalibration()}
+              />
               <CapturePanel
                 capture={capture}
                 setCapture={setCapture}
                 busy={busy}
                 piReady={piReady}
-                onCalibrate={() =>
-                  runAction("Calibration", () => apiPost("/api/calibrate"), (result) => {
-                    appendLog("info", JSON.stringify(result));
-                    setPreviewMode(preferredPreviewMode);
-                    setSnapshotFailed(false);
-                    setSnapshotNonce(Date.now());
-                  })
-                }
                 onCapture={() =>
                   runAction(
                     "Capture",
@@ -1179,14 +1246,12 @@ function CapturePanel({
   setCapture,
   busy,
   piReady,
-  onCalibrate,
   onCapture,
 }: {
   capture: CaptureForm;
   setCapture: (value: CaptureForm) => void;
   busy: string | null;
   piReady: boolean;
-  onCalibrate: () => void;
   onCapture: () => void;
 }) {
   return (
@@ -1197,10 +1262,6 @@ function CapturePanel({
         <strong>{piReady ? `${capture.count} frames, ${capture.eye} eye` : "Check SSH and camera status"}</strong>
       </div>
       <div className="button-row action-row">
-        <button className="secondary" onClick={onCalibrate} disabled={busy !== null}>
-          <ListChecks size={17} />
-          Calibrate
-        </button>
         <button className="primary" onClick={onCapture} disabled={busy !== null || !piReady}>
           <Play size={17} />
           Capture Stack
@@ -1290,6 +1351,133 @@ function CapturePanel({
           </Field>
         </div>
       </details>
+    </section>
+  );
+}
+
+function CalibrationPanel({
+  calibration,
+  busy,
+  piReady,
+  onRun,
+  onApply,
+  onRevert,
+}: {
+  calibration: CalibrationStatus | null;
+  busy: string | null;
+  piReady: boolean;
+  onRun: () => void;
+  onApply: () => void;
+  onRevert: () => void;
+}) {
+  const status = calibration ?? {
+    ok: true,
+    active: false,
+    status: "idle",
+    job_id: null,
+    phase: "idle",
+    progress: 0,
+    message: "No calibration run yet.",
+    started_at: null,
+    completed_at: null,
+    candidates: [],
+    warnings: [],
+    recommendation: null,
+    report_path: null,
+    remote_dir: null,
+    local_dir: null,
+    error: null,
+    applied_profile: null,
+  } satisfies CalibrationStatus;
+  const recommendation = status.recommendation;
+  const bestThumbnail =
+    recommendation?.artifacts.selected_best_frame ??
+    recommendation?.artifacts.best_thumbnail ??
+    recommendation?.artifacts.best_frame ??
+    null;
+  const baselineThumbnail = recommendation?.artifacts.baseline_thumbnail ?? recommendation?.artifacts.baseline_frame ?? null;
+  const canApply = Boolean(recommendation && !status.active && status.status !== "applied");
+  const canRevert = Boolean(status.applied_profile && !status.active);
+  return (
+    <section className="panel calibration-panel">
+      <PanelTitle icon={<ListChecks size={18} />} title="Auto Calibration" actionLabel={status.status} />
+      <div className={`calibration-summary ${status.status === "failed" ? "error" : recommendation ? "ok" : "warn"}`}>
+        <span>{status.phase.replaceAll("_", " ")}</span>
+        <strong>{recommendation ? `${recommendation.confidence} confidence, score ${formatScore(recommendation.score)}` : status.message}</strong>
+        <div className="calibration-progress" aria-label={`Calibration progress ${Math.round((status.progress ?? 0) * 100)}%`}>
+          <span style={{ width: `${Math.max(0, Math.min(100, (status.progress ?? 0) * 100))}%` }} />
+        </div>
+      </div>
+      <div className="calibration-phases" aria-label="Calibration phases">
+        {calibrationPhases.map((phase, index) => {
+          const activeIndex = calibrationPhases.findIndex((item) => item.key === status.phase);
+          const done = status.status === "complete" || status.status === "applied" || (activeIndex >= 0 && index < activeIndex);
+          const active = phase.key === status.phase;
+          return (
+            <span className={done ? "done" : active ? "active" : ""} key={phase.key}>
+              {done ? <CheckCircle2 size={12} /> : index + 1}
+              {phase.label}
+            </span>
+          );
+        })}
+      </div>
+      {recommendation ? (
+        <>
+          <div className="calibration-evidence">
+            {baselineThumbnail ? (
+              <figure>
+                <img src={artifactUrl(baselineThumbnail)} alt="Baseline calibration frame" />
+                <figcaption>Before</figcaption>
+              </figure>
+            ) : null}
+            {bestThumbnail ? (
+              <figure>
+                <img src={artifactUrl(bestThumbnail)} alt="Best calibration candidate" />
+                <figcaption>Best</figcaption>
+              </figure>
+            ) : null}
+          </div>
+          <div className="metrics-row compact">
+            <Metric label="Luma" value={formatMetric(recommendation.quality.mean_luma, 2)} />
+            <Metric label="Clipping" value={formatPercent(recommendation.quality.clip_fraction)} />
+            <Metric label="Focus" value={formatMetric(recommendation.quality.focus_score, 1)} />
+            <Metric label="Mask" value={formatPercent(recommendation.quality.mask_coverage)} />
+          </div>
+          <div className="settings-diff">
+            {recommendation.settings_diff.length === 0 ? <p>No capture setting changes recommended.</p> : null}
+            {recommendation.settings_diff.map((item) => (
+              <div key={item.field}>
+                <span>{item.field}</span>
+                <strong>
+                  {formatCalibrationValue(item.before)} to {formatCalibrationValue(item.after)}
+                </strong>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {status.error ? <p className="panel-error">{status.error}</p> : null}
+      {status.warnings?.length ? (
+        <ul className="recommendations compact">
+          {status.warnings.map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="button-row action-row">
+        <button className="secondary" onClick={onRun} disabled={busy !== null || status.active || !piReady}>
+          <RefreshCw size={17} />
+          Run Auto Calibration
+        </button>
+        <button className="primary" onClick={onApply} disabled={busy !== null || !canApply}>
+          <CheckCircle2 size={17} />
+          Apply Profile
+        </button>
+        <button className="secondary" onClick={onRevert} disabled={busy !== null || !canRevert}>
+          <Undo2 size={17} />
+          Revert Profile
+        </button>
+      </div>
     </section>
   );
 }
@@ -1594,6 +1782,16 @@ function SettingsPanel({
     setSettings({ ...settings, preview: { ...settings.preview, ...patch } });
   const updateProcessing = (patch: Partial<ConfigPayload["processing"]>) =>
     setSettings({ ...settings, processing: { ...settings.processing, ...patch } });
+  const updateCalibration = (patch: Partial<ConfigPayload["calibration"]>) =>
+    setSettings({ ...settings, calibration: { ...settings.calibration, ...patch } });
+  const updateCalibrationWeights = (patch: Partial<ConfigPayload["calibration"]["weights"]>) =>
+    setSettings({
+      ...settings,
+      calibration: {
+        ...settings.calibration,
+        weights: { ...settings.calibration.weights, ...patch },
+      },
+    });
 
   return (
     <section className="panel settings-panel">
@@ -1792,6 +1990,112 @@ function SettingsPanel({
           />
         </Field>
       </div>
+
+      <h3>Calibration</h3>
+      <div className="form-grid">
+        <Field label="Target luma min">
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step="0.01"
+            value={settings.calibration.target_luma_min}
+            onChange={(event) => updateCalibration({ target_luma_min: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Target luma max">
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step="0.01"
+            value={settings.calibration.target_luma_max}
+            onChange={(event) => updateCalibration({ target_luma_max: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Max clipping">
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step="0.005"
+            value={settings.calibration.max_clip_fraction}
+            onChange={(event) => updateCalibration({ max_clip_fraction: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Sample budget">
+          <input
+            type="number"
+            min={2}
+            max={40}
+            value={settings.calibration.sample_budget}
+            onChange={(event) => updateCalibration({ sample_budget: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Max shutter us">
+          <input
+            type="number"
+            min={1}
+            value={settings.calibration.max_shutter_us}
+            onChange={(event) => updateCalibration({ max_shutter_us: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Max gain">
+          <input
+            type="number"
+            min={0.1}
+            step="0.1"
+            value={settings.calibration.max_gain}
+            onChange={(event) => updateCalibration({ max_gain: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Command timeout s">
+          <input
+            type="number"
+            min={5}
+            value={settings.calibration.command_timeout_s}
+            onChange={(event) => updateCalibration({ command_timeout_s: Number(event.target.value) })}
+          />
+        </Field>
+        <Field label="Thumbnail edge">
+          <input
+            type="number"
+            min={64}
+            value={settings.calibration.thumbnail_edge}
+            onChange={(event) => updateCalibration({ thumbnail_edge: Number(event.target.value) })}
+          />
+        </Field>
+      </div>
+      <label className="checkbox-line">
+        <input
+          type="checkbox"
+          checked={settings.calibration.retain_artifacts}
+          onChange={(event) => updateCalibration({ retain_artifacts: event.target.checked })}
+        />
+        Keep calibration reports and thumbnails
+      </label>
+      <details className="advanced-controls">
+        <summary>
+          <SlidersHorizontal size={16} />
+          <span>
+            <strong>Calibration scoring</strong>
+            <small>Weights for recommendation ranking</small>
+          </span>
+        </summary>
+        <div className="form-grid">
+          {(["luma", "clipping", "focus", "mask", "color", "gain", "metadata"] as const).map((key) => (
+            <Field label={`${key} weight`} key={key}>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={settings.calibration.weights[key]}
+                onChange={(event) => updateCalibrationWeights({ [key]: Number(event.target.value) })}
+              />
+            </Field>
+          ))}
+        </div>
+      </details>
 
       <h3>Processing Defaults</h3>
       <div className="form-grid">
@@ -2132,6 +2436,31 @@ function Metric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatMetric(value: number | null | undefined, digits: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "-";
+}
+
+function formatPercent(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 1000) / 10}%` : "-";
+}
+
+function formatScore(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "-";
+}
+
+function formatCalibrationValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatCalibrationValue(item)).join(", ");
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  if (value === null || value === undefined || value === "") {
+    return "auto";
+  }
+  return String(value);
 }
 
 function now() {

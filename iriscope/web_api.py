@@ -13,10 +13,16 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal
 from urllib.parse import quote
 
+from .calibration import (
+    capture_settings_from_profile,
+    capture_settings_to_profile,
+    run_auto_calibration,
+)
 from .capture import (
     build_rpicam_mjpeg_command,
     build_rpicam_command,
@@ -28,6 +34,8 @@ from .capture import (
 )
 from .config import (
     CaptureSettings,
+    CalibrationSettings,
+    CalibrationWeights,
     PiConfig,
     PreviewSettings,
     ProcessingSettings,
@@ -63,6 +71,8 @@ _LAST_PREVIEW_FRAME: dict[str, Any] | None = None
 _WEBRTC_LOCK = threading.Lock()
 _ACTIVE_WEBRTC_PEERS: set[Any] = set()
 _ACTIVE_WEBRTC_TRACKS: set[Any] = set()
+_CALIBRATION_LOCK = threading.Lock()
+_CALIBRATION_JOB: dict[str, Any] | None = None
 HEALTH_STALE_AFTER_S = 15.0
 REMOTE_MJPEG_PREVIEW_PATTERN = "rpicam-vid .*--codec mjpeg .* -o -"
 
@@ -193,11 +203,38 @@ class ProcessingConfigRequest(BaseModel):
     quality: QualityThresholdsRequest = Field(default_factory=QualityThresholdsRequest)
 
 
+class CalibrationWeightsRequest(BaseModel):
+    luma: float = Field(default=0.28, ge=0.0)
+    clipping: float = Field(default=0.20, ge=0.0)
+    focus: float = Field(default=0.18, ge=0.0)
+    mask: float = Field(default=0.14, ge=0.0)
+    color: float = Field(default=0.08, ge=0.0)
+    gain: float = Field(default=0.07, ge=0.0)
+    metadata: float = Field(default=0.05, ge=0.0)
+
+
+class CalibrationConfigRequest(BaseModel):
+    target_luma_min: float = Field(default=0.38, ge=0.0, le=1.0)
+    target_luma_max: float = Field(default=0.58, ge=0.0, le=1.0)
+    max_clip_fraction: float = Field(default=0.03, ge=0.0, le=1.0)
+    sample_budget: int = Field(default=10, ge=2, le=40)
+    retain_artifacts: bool = True
+    thumbnail_edge: int = Field(default=360, ge=64, le=1200)
+    min_shutter_us: int = Field(default=800, ge=1)
+    max_shutter_us: int = Field(default=30000, ge=1)
+    min_gain: float = Field(default=1.0, ge=0.0)
+    max_gain: float = Field(default=8.0, ge=0.1)
+    command_timeout_s: int = Field(default=60, ge=5, le=300)
+    scp_timeout_s: int = Field(default=60, ge=5, le=300)
+    weights: CalibrationWeightsRequest = Field(default_factory=CalibrationWeightsRequest)
+
+
 class ConfigUpdateRequest(BaseModel):
     pi: PiConfigRequest
     capture: CaptureConfigRequest
     preview: PreviewConfigRequest
     processing: ProcessingConfigRequest
+    calibration: CalibrationConfigRequest = Field(default_factory=CalibrationConfigRequest)
 
 
 def create_app() -> FastAPI:
@@ -342,6 +379,85 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"ok": True, "status": "captured", "camera_list": camera_list, "remote_dir": remote_dir}
+
+    @app.post("/api/calibration/run")
+    async def calibration_run() -> dict[str, Any]:
+        config = load_config(CONFIG_PATH)
+        if not config.pi.host:
+            raise HTTPException(status_code=400, detail="No Pi host configured in .iriscope.toml.")
+        with _CALIBRATION_LOCK:
+            if _calibration_job_active_locked():
+                raise HTTPException(status_code=409, detail="A calibration job is already running.")
+        try:
+            await _stop_pi_preview_transports(config)
+            await asyncio.to_thread(_start_calibration_job, config)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _calibration_status_payload()
+
+    @app.get("/api/calibration/status")
+    async def calibration_status() -> dict[str, Any]:
+        return _calibration_status_payload()
+
+    @app.post("/api/calibration/apply")
+    async def calibration_apply() -> dict[str, Any]:
+        config = load_config(CONFIG_PATH)
+        with _CALIBRATION_LOCK:
+            job = dict(_CALIBRATION_JOB or {})
+            recommendation = job.get("recommendation")
+        if not recommendation:
+            raise HTTPException(status_code=409, detail="No calibration recommendation is ready to apply.")
+        try:
+            applied_capture = capture_settings_from_profile(recommendation["capture"])
+            previous_profile = capture_settings_to_profile(config.capture)
+            applied_profile = capture_settings_to_profile(applied_capture)
+            next_config = replace(config, capture=applied_capture)
+            await asyncio.to_thread(_write_project_config, CONFIG_PATH, next_config)
+            profile = {
+                "version": 1,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "job_id": job.get("job_id"),
+                "report_path": job.get("report_path"),
+                "previous_capture": previous_profile,
+                "applied_capture": applied_profile,
+                "recommendation": {
+                    "candidate_id": recommendation.get("candidate_id"),
+                    "score": recommendation.get("score"),
+                    "confidence": recommendation.get("confidence"),
+                },
+            }
+            await asyncio.to_thread(_write_applied_calibration_profile, profile)
+            _mark_calibration_applied(profile)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "status": "applied",
+            "applied_profile": profile,
+            "config": _status_config_dict(next_config),
+        }
+
+    @app.post("/api/calibration/revert")
+    async def calibration_revert() -> dict[str, Any]:
+        config = load_config(CONFIG_PATH)
+        profile = _load_applied_calibration_profile()
+        if not profile or not profile.get("previous_capture"):
+            raise HTTPException(status_code=409, detail="No calibration rollback profile is available.")
+        try:
+            previous_capture = capture_settings_from_profile(profile["previous_capture"])
+            next_config = replace(config, capture=previous_capture)
+            await asyncio.to_thread(_write_project_config, CONFIG_PATH, next_config)
+            profile = {**profile, "reverted_at": datetime.now(timezone.utc).isoformat()}
+            await asyncio.to_thread(_write_applied_calibration_profile, profile)
+            _mark_calibration_reverted(profile)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "status": "reverted",
+            "applied_profile": profile,
+            "config": _status_config_dict(next_config),
+        }
 
     @app.post("/api/capture")
     async def capture(request: CaptureRequest) -> dict[str, Any]:
@@ -501,6 +617,182 @@ def _run_calibration(config) -> tuple[str, str]:
     camera_list = verify_remote_camera(config.pi)
     remote_dir = capture_remote_calibration(config.pi, config.capture)
     return camera_list, remote_dir
+
+
+def _start_calibration_job(config: ProjectConfig) -> None:
+    job_id = f"calibration_{int(time.time() * 1000)}"
+    with _CALIBRATION_LOCK:
+        global _CALIBRATION_JOB
+        _CALIBRATION_JOB = {
+            "ok": True,
+            "active": True,
+            "status": "running",
+            "job_id": job_id,
+            "phase": "precheck",
+            "progress": 0.0,
+            "message": "Calibration job queued.",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "candidates": [],
+            "warnings": [],
+            "recommendation": None,
+            "report_path": None,
+            "remote_dir": None,
+            "local_dir": None,
+            "error": None,
+            "previous_capture": capture_settings_to_profile(config.capture),
+            "applied_profile": _load_applied_calibration_profile(),
+        }
+    thread = threading.Thread(target=_run_calibration_job, args=(config, job_id), daemon=True)
+    thread.start()
+
+
+def _run_calibration_job(config: ProjectConfig, job_id: str) -> None:
+    def update(payload: dict[str, Any]) -> None:
+        _update_calibration_job(job_id, payload)
+
+    try:
+        result = run_auto_calibration(config, _calibration_root(), progress=update)
+        _complete_calibration_job(job_id, result)
+    except Exception as exc:
+        _fail_calibration_job(job_id, str(exc))
+
+
+def _update_calibration_job(job_id: str, payload: dict[str, Any]) -> None:
+    with _CALIBRATION_LOCK:
+        if not _CALIBRATION_JOB or _CALIBRATION_JOB.get("job_id") != job_id:
+            return
+        _CALIBRATION_JOB.update(
+            {
+                "phase": payload.get("phase", _CALIBRATION_JOB.get("phase")),
+                "progress": payload.get("progress", _CALIBRATION_JOB.get("progress", 0.0)),
+                "message": payload.get("message", _CALIBRATION_JOB.get("message")),
+                "candidates": payload.get("candidates", _CALIBRATION_JOB.get("candidates", [])),
+                "warnings": payload.get("warnings", _CALIBRATION_JOB.get("warnings", [])),
+                "recommendation": payload.get("recommendation", _CALIBRATION_JOB.get("recommendation")),
+                "report_path": payload.get("report_path", _CALIBRATION_JOB.get("report_path")),
+            }
+        )
+
+
+def _complete_calibration_job(job_id: str, result) -> None:
+    with _CALIBRATION_LOCK:
+        if not _CALIBRATION_JOB or _CALIBRATION_JOB.get("job_id") != job_id:
+            return
+        _CALIBRATION_JOB.update(
+            {
+                "ok": True,
+                "active": False,
+                "status": "complete",
+                "phase": "recommendation",
+                "progress": 1.0,
+                "message": "Calibration recommendation ready.",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "candidates": result.candidates,
+                "warnings": result.warnings,
+                "recommendation": result.recommendation,
+                "report_path": str(result.report_path),
+                "remote_dir": result.remote_dir,
+                "local_dir": str(result.local_dir),
+                "error": None,
+            }
+        )
+
+
+def _fail_calibration_job(job_id: str, message: str) -> None:
+    with _CALIBRATION_LOCK:
+        if not _CALIBRATION_JOB or _CALIBRATION_JOB.get("job_id") != job_id:
+            return
+        _CALIBRATION_JOB.update(
+            {
+                "ok": False,
+                "active": False,
+                "status": "failed",
+                "phase": "failed",
+                "progress": _CALIBRATION_JOB.get("progress", 0.0),
+                "message": "Calibration failed.",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": message,
+            }
+        )
+
+
+def _mark_calibration_applied(profile: dict[str, Any]) -> None:
+    with _CALIBRATION_LOCK:
+        if not _CALIBRATION_JOB:
+            return
+        _CALIBRATION_JOB.update(
+            {
+                "status": "applied",
+                "active": False,
+                "applied_profile": profile,
+                "message": "Calibration profile applied.",
+            }
+        )
+
+
+def _mark_calibration_reverted(profile: dict[str, Any]) -> None:
+    with _CALIBRATION_LOCK:
+        if not _CALIBRATION_JOB:
+            return
+        _CALIBRATION_JOB.update(
+            {
+                "status": "reverted",
+                "active": False,
+                "applied_profile": profile,
+                "message": "Calibration profile reverted.",
+            }
+        )
+
+
+def _calibration_status_payload() -> dict[str, Any]:
+    with _CALIBRATION_LOCK:
+        job = dict(_CALIBRATION_JOB or {})
+    if not job:
+        return {
+            "ok": True,
+            "active": False,
+            "status": "idle",
+            "job_id": None,
+            "phase": "idle",
+            "progress": 0.0,
+            "message": "No calibration job has run in this API process.",
+            "started_at": None,
+            "completed_at": None,
+            "candidates": [],
+            "warnings": [],
+            "recommendation": None,
+            "report_path": None,
+            "remote_dir": None,
+            "local_dir": None,
+            "error": None,
+            "applied_profile": _load_applied_calibration_profile(),
+        }
+    return job
+
+
+def _calibration_job_active_locked() -> bool:
+    return bool(_CALIBRATION_JOB and _CALIBRATION_JOB.get("active"))
+
+
+def _applied_calibration_profile_path() -> Path:
+    return _calibration_root() / "applied_profile.json"
+
+
+def _write_applied_calibration_profile(profile: dict[str, Any]) -> None:
+    path = _applied_calibration_profile_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(profile, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_applied_calibration_profile() -> dict[str, Any] | None:
+    path = _applied_calibration_profile_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def _health_status(config: ProjectConfig) -> dict[str, Any]:
@@ -753,6 +1045,7 @@ def _config_from_request(request: ConfigUpdateRequest) -> ProjectConfig:
     capture = request.capture
     preview = request.preview
     processing = request.processing
+    calibration = request.calibration
     return ProjectConfig(
         pi=PiConfig(
             host=_blank_to_none(pi.host),
@@ -801,6 +1094,21 @@ def _config_from_request(request: ConfigUpdateRequest) -> ProjectConfig:
             max_working_edge=processing.max_working_edge,
             quality=QualityThresholds(**_model_data(processing.quality)),
         ),
+        calibration=CalibrationSettings(
+            target_luma_min=calibration.target_luma_min,
+            target_luma_max=calibration.target_luma_max,
+            max_clip_fraction=calibration.max_clip_fraction,
+            sample_budget=calibration.sample_budget,
+            retain_artifacts=calibration.retain_artifacts,
+            thumbnail_edge=calibration.thumbnail_edge,
+            min_shutter_us=calibration.min_shutter_us,
+            max_shutter_us=calibration.max_shutter_us,
+            min_gain=calibration.min_gain,
+            max_gain=calibration.max_gain,
+            command_timeout_s=calibration.command_timeout_s,
+            scp_timeout_s=calibration.scp_timeout_s,
+            weights=CalibrationWeights(**_model_data(calibration.weights)),
+        ),
     )
 
 
@@ -817,6 +1125,7 @@ def _status_config_dict(config: ProjectConfig) -> dict[str, Any]:
         "capture": _capture_dict(config.capture),
         "preview": _preview_dict(config.capture, config.preview),
         "processing": asdict(config.processing),
+        "calibration": asdict(config.calibration),
     }
 
 
@@ -826,6 +1135,7 @@ def _config_payload(config: ProjectConfig) -> dict[str, Any]:
         "capture": _capture_dict(config.capture),
         "preview": _preview_dict(config.capture, config.preview),
         "processing": asdict(config.processing),
+        "calibration": asdict(config.calibration),
     }
 
 
@@ -885,6 +1195,29 @@ def _write_project_config(path: Path, config: ProjectConfig) -> None:
         f"framerate = {config.preview.framerate}",
         f"quality = {config.preview.quality}",
         f"stream_timeout_s = {config.preview.stream_timeout_s}",
+        "",
+        "[calibration]",
+        f"target_luma_min = {_float(config.calibration.target_luma_min)}",
+        f"target_luma_max = {_float(config.calibration.target_luma_max)}",
+        f"max_clip_fraction = {_float(config.calibration.max_clip_fraction)}",
+        f"sample_budget = {config.calibration.sample_budget}",
+        f"retain_artifacts = {_toml(config.calibration.retain_artifacts)}",
+        f"thumbnail_edge = {config.calibration.thumbnail_edge}",
+        f"min_shutter_us = {config.calibration.min_shutter_us}",
+        f"max_shutter_us = {config.calibration.max_shutter_us}",
+        f"min_gain = {_float(config.calibration.min_gain)}",
+        f"max_gain = {_float(config.calibration.max_gain)}",
+        f"command_timeout_s = {config.calibration.command_timeout_s}",
+        f"scp_timeout_s = {config.calibration.scp_timeout_s}",
+        "",
+        "[calibration.weights]",
+        f"luma = {_float(config.calibration.weights.luma)}",
+        f"clipping = {_float(config.calibration.weights.clipping)}",
+        f"focus = {_float(config.calibration.weights.focus)}",
+        f"mask = {_float(config.calibration.weights.mask)}",
+        f"color = {_float(config.calibration.weights.color)}",
+        f"gain = {_float(config.calibration.weights.gain)}",
+        f"metadata = {_float(config.calibration.weights.metadata)}",
         "",
         "[processing]",
         f"stack_method = {_toml(config.processing.stack_method)}",
@@ -1706,8 +2039,9 @@ def _resolve_artifact_path(value: str) -> Path:
         raise FileNotFoundError(f"Path is not a file: {resolved}")
     if resolved.suffix.lower() not in ARTIFACT_SUFFIXES:
         raise ValueError(f"Unsupported artifact type: {resolved.suffix}")
-    if not _is_relative_to(resolved, CAPTURES_ROOT):
-        raise ValueError(f"Artifact is outside the capture root: {resolved}")
+    calibration_root = _calibration_root()
+    if not (_is_relative_to(resolved, CAPTURES_ROOT) or _is_relative_to(resolved, calibration_root)):
+        raise ValueError(f"Artifact is outside allowed roots: {resolved}")
     return resolved
 
 

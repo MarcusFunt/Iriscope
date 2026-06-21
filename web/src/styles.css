@@ -378,6 +378,10 @@ nav {
   grid-column: 2;
 }
 
+.calibration-panel {
+  grid-column: 2;
+}
+
 .session-rail {
   grid-column: 3;
   grid-row: span 2;
@@ -671,6 +675,156 @@ nav {
   font-size: 14px;
 }
 
+.calibration-summary {
+  display: grid;
+  gap: 7px;
+  border: 1px solid rgba(242, 199, 125, 0.45);
+  border-radius: 8px;
+  background: #161a1d;
+  padding: 11px 12px;
+}
+
+.calibration-summary.ok {
+  border-color: rgba(114, 216, 197, 0.48);
+  background: #172421;
+}
+
+.calibration-summary.error {
+  border-color: rgba(238, 124, 104, 0.55);
+}
+
+.calibration-summary span {
+  color: #9aa6a7;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.calibration-summary strong {
+  color: #eef3f2;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.calibration-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #263034;
+}
+
+.calibration-progress span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: #72d8c5;
+  transition: width 180ms ease;
+}
+
+.calibration-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.calibration-phases span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #303a3e;
+  border-radius: 999px;
+  background: #131719;
+  color: #aeb8ba;
+  padding: 0 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.calibration-phases span.active {
+  color: #f2c77d;
+  border-color: #6c5430;
+}
+
+.calibration-phases span.done {
+  color: #9debd5;
+  border-color: #2d665b;
+}
+
+.calibration-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.calibration-evidence figure {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #2a3336;
+  border-radius: 8px;
+  background: #111517;
+}
+
+.calibration-evidence img {
+  width: 100%;
+  height: 104px;
+  display: block;
+  object-fit: cover;
+  background: #080a0b;
+}
+
+.calibration-evidence figcaption {
+  color: #aeb8ba;
+  font-size: 11px;
+  padding: 7px 9px;
+}
+
+.metrics-row.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.settings-diff {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.settings-diff div,
+.settings-diff p {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  border: 1px solid #2a3336;
+  border-radius: 8px;
+  background: #131719;
+  color: #bdc8c7;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.settings-diff span {
+  color: #819092;
+  text-transform: uppercase;
+}
+
+.settings-diff strong {
+  color: #eef3f2;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.panel-error {
+  margin: 11px 0 0;
+  color: #ee9a88;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .capture-core-grid {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 0.75fr);
 }
@@ -902,6 +1056,11 @@ a:focus-visible {
   color: #bdc8c7;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.recommendations.compact {
+  min-height: 0;
+  font-size: 12px;
 }
 
 .output-grid {
@@ -1190,6 +1349,7 @@ a:focus-visible {
   }
 
   .capture-panel,
+  .calibration-panel,
   .session-rail {
     grid-column: auto;
     grid-row: auto;
@@ -1216,7 +1376,13 @@ a:focus-visible {
   }
 
   .capture-panel .button-row > *,
+  .calibration-panel .button-row > *,
   .preprocess-panel .button-row > * {
     flex: 1;
+  }
+
+  .calibration-evidence,
+  .metrics-row.compact {
+    grid-template-columns: 1fr 1fr;
   }
 }

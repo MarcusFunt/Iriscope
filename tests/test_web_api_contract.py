@@ -1,5 +1,7 @@
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -295,6 +297,29 @@ def test_config_endpoint_persists_settings(tmp_path: Path, monkeypatch):
                     "max_contrast_gain_for_edge": 2.8,
                 },
             },
+            "calibration": {
+                "target_luma_min": 0.4,
+                "target_luma_max": 0.6,
+                "max_clip_fraction": 0.025,
+                "sample_budget": 8,
+                "retain_artifacts": True,
+                "thumbnail_edge": 320,
+                "min_shutter_us": 900,
+                "max_shutter_us": 25000,
+                "min_gain": 1.0,
+                "max_gain": 6.0,
+                "command_timeout_s": 45,
+                "scp_timeout_s": 45,
+                "weights": {
+                    "luma": 0.3,
+                    "clipping": 0.2,
+                    "focus": 0.2,
+                    "mask": 0.12,
+                    "color": 0.07,
+                    "gain": 0.06,
+                    "metadata": 0.05,
+                },
+            },
         },
     )
 
@@ -306,6 +331,77 @@ def test_config_endpoint_persists_settings(tmp_path: Path, monkeypatch):
     assert 'stack_method = "median"' in text
     assert "[processing.quality]" in text
     assert "max_clip_fraction = 0.18" in text
+    assert "[calibration]" in text
+    assert "sample_budget = 8" in text
+    assert "[calibration.weights]" in text
+
+
+def test_calibration_run_rejects_missing_pi_host(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    config_path = tmp_path / ".iriscope.toml"
+    config_path.write_text(
+        """
+[pi]
+user = "camera"
+""",
+        encoding="utf-8",
+    )
+
+    response = client.post("/api/calibration/run")
+
+    assert response.status_code == 400
+    assert "No Pi host" in response.json()["detail"]
+
+
+def test_calibration_run_enforces_single_active_job(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    web_api._CALIBRATION_JOB = {"active": True, "job_id": "running"}
+
+    response = client.post("/api/calibration/run")
+
+    assert response.status_code == 409
+    web_api._CALIBRATION_JOB = None
+
+
+def test_calibration_run_status_apply_and_revert(tmp_path: Path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    recommendation = _fake_recommendation()
+
+    def fake_run_auto_calibration(config, local_root, progress=None):
+        report = Path(local_root) / "cal_test" / "calibration_report.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("{}", encoding="utf-8")
+        if progress:
+            progress({"phase": "exposure_sweep", "progress": 0.5, "message": "halfway"})
+        return SimpleNamespace(
+            candidates=[{"candidate_id": "candidate_00", "score": 0.88}],
+            warnings=[],
+            recommendation=recommendation,
+            report_path=report,
+            remote_dir="/home/camera/iriscope/calibration-runs/cal_test",
+            local_dir=report.parent,
+        )
+
+    monkeypatch.setattr(web_api, "run_auto_calibration", fake_run_auto_calibration)
+
+    start = client.post("/api/calibration/run")
+    assert start.status_code == 200
+
+    status = _poll_calibration_status(client)
+    assert status["status"] == "complete"
+    assert status["recommendation"]["capture"]["shutter_us"] == 11000
+
+    applied = client.post("/api/calibration/apply")
+    assert applied.status_code == 200
+    applied_payload = applied.json()
+    assert applied_payload["status"] == "applied"
+    assert "ssh_key" not in applied_payload["config"]
+    assert 'shutter_us = 11000' in (tmp_path / ".iriscope.toml").read_text(encoding="utf-8")
+
+    reverted = client.post("/api/calibration/revert")
+    assert reverted.status_code == 200
+    assert reverted.json()["status"] == "reverted"
+    assert 'shutter_us = 6000' in (tmp_path / ".iriscope.toml").read_text(encoding="utf-8")
 
 
 def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path]:
@@ -335,6 +431,7 @@ save_intermediates = false
     monkeypatch.setattr(web_api, "CAPTURES_ROOT", captures.resolve())
     monkeypatch.setattr(web_api, "_health_status", lambda config: _fake_health())
     monkeypatch.setattr(web_api, "_stop_remote_mjpeg_preview", lambda pi: None)
+    web_api._CALIBRATION_JOB = None
     return TestClient(web_api.create_app()), captures
 
 
@@ -378,3 +475,55 @@ def _fake_health() -> dict:
         "disk": check,
         "windows_pnp": check,
     }
+
+
+def _fake_recommendation() -> dict:
+    return {
+        "candidate_id": "candidate_00",
+        "label": "best",
+        "score": 0.88,
+        "confidence": "high",
+        "capture": {
+            "count": 16,
+            "shutter_us": 11000,
+            "gain": 1.4,
+            "awb": "manual",
+            "awb_gains": [2.1, 1.3],
+            "denoise": "cdn_fast",
+            "quality": 95,
+            "width": None,
+            "height": None,
+            "metering": "centre",
+            "exposure": "normal",
+            "ev": 0.0,
+            "brightness": 0.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+            "sharpness": 1.0,
+            "tuning_file": None,
+            "mode": None,
+            "hdr": "off",
+            "nopreview": True,
+            "immediate": True,
+            "raw": True,
+        },
+        "settings_diff": [{"field": "shutter_us", "before": 6000, "after": 11000}],
+        "quality": {
+            "mean_luma": 0.48,
+            "clip_fraction": 0.005,
+            "focus_score": 55.0,
+            "mask_coverage": 0.22,
+            "geometry_confidence": "high",
+        },
+        "artifacts": {"best_thumbnail": None, "best_frame": None, "report": None},
+        "reasons": ["luma score 1.00"],
+    }
+
+
+def _poll_calibration_status(client: TestClient) -> dict:
+    for _ in range(40):
+        payload = client.get("/api/calibration/status").json()
+        if payload["status"] in {"complete", "failed"}:
+            return payload
+        time.sleep(0.05)
+    return payload

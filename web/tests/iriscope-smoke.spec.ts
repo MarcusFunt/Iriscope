@@ -34,6 +34,30 @@ const qualityThresholds = {
   max_contrast_gain_for_edge: 3,
 };
 
+const calibrationSettings = {
+  target_luma_min: 0.38,
+  target_luma_max: 0.58,
+  max_clip_fraction: 0.03,
+  sample_budget: 10,
+  retain_artifacts: true,
+  thumbnail_edge: 360,
+  min_shutter_us: 800,
+  max_shutter_us: 30000,
+  min_gain: 1,
+  max_gain: 8,
+  command_timeout_s: 60,
+  scp_timeout_s: 60,
+  weights: {
+    luma: 0.28,
+    clipping: 0.2,
+    focus: 0.18,
+    mask: 0.14,
+    color: 0.08,
+    gain: 0.07,
+    metadata: 0.05,
+  },
+};
+
 const editableConfig = {
   pi: {
     host: "iriscope-pi.local",
@@ -86,6 +110,7 @@ const editableConfig = {
     max_working_edge: null,
     quality: qualityThresholds,
   },
+  calibration: calibrationSettings,
 };
 
 test("main workstation flow loads config, labels, preprocesses, processes, and saves", async ({ page }) => {
@@ -95,6 +120,9 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   let processPayload: Record<string, unknown> | null = null;
   let piWebrtcRequested = false;
   let piStreamRequested = false;
+  let calibrationApplied = false;
+  let calibrationReverted = false;
+  let calibrationStatus: Record<string, unknown> = idleCalibrationStatus();
 
   await page.route("**/api/status", async (route) => {
     await route.fulfill({
@@ -112,6 +140,7 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
           capture: editableConfig.capture,
           preview: editableConfig.preview,
           processing: editableConfig.processing,
+          calibration: editableConfig.calibration,
         },
         health: {
           ssh: { ok: true, status: "ok", message: "SSH key access verified." },
@@ -138,6 +167,41 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
       return;
     }
     await route.fulfill({ json: { ok: true, path: "C:/Iriscope/.iriscope.toml", config: editableConfig } });
+  });
+
+  await page.route("**/api/calibration/status", async (route) => {
+    await route.fulfill({ json: calibrationStatus });
+  });
+
+  await page.route("**/api/calibration/run", async (route) => {
+    calibrationStatus = completeCalibrationStatus();
+    await route.fulfill({ json: calibrationStatus });
+  });
+
+  await page.route("**/api/calibration/apply", async (route) => {
+    calibrationApplied = true;
+    calibrationStatus = { ...completeCalibrationStatus(), status: "applied", applied_profile: { applied_at: "2026-06-21T10:00:00Z" } };
+    await route.fulfill({
+      json: {
+        ok: true,
+        status: "applied",
+        applied_profile: calibrationStatus.applied_profile,
+        config: { ...editableConfig, pi_host: editableConfig.pi.host, ssh_key_configured: true },
+      },
+    });
+  });
+
+  await page.route("**/api/calibration/revert", async (route) => {
+    calibrationReverted = true;
+    calibrationStatus = { ...completeCalibrationStatus(), status: "reverted", applied_profile: { reverted_at: "2026-06-21T10:05:00Z" } };
+    await route.fulfill({
+      json: {
+        ok: true,
+        status: "reverted",
+        applied_profile: calibrationStatus.applied_profile,
+        config: { ...editableConfig, pi_host: editableConfig.pi.host, ssh_key_configured: true },
+      },
+    });
   });
 
   await page.route("**/api/sessions", async (route) => {
@@ -256,6 +320,14 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect(page.locator(".quality-strip .metric").filter({ hasText: "Luma" }).locator("strong")).toHaveText(/\d+\.\d{2}/);
   await expect(page.locator(".quality-strip .metric").filter({ hasText: "Ready" }).locator("strong")).toHaveText("no");
   await expect(page.getByText("Next action")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Auto Calibration" })).toBeVisible();
+  await page.getByRole("button", { name: "Run Auto Calibration" }).click();
+  await expect(page.getByText("high confidence, score 0.88")).toBeVisible();
+  await expect(page.getByText("shutter_us")).toBeVisible();
+  await page.getByRole("button", { name: "Apply Profile" }).click();
+  await expect.poll(() => calibrationApplied).toBe(true);
+  await page.getByRole("button", { name: "Revert Profile" }).click();
+  await expect.poll(() => calibrationReverted).toBe(true);
   await expect(page.getByText("Camera tuning")).toBeVisible();
   await expect(page.getByLabel("Frames")).toHaveValue("16");
   await page.getByText("Camera tuning").click();
@@ -290,3 +362,71 @@ test("main workstation flow loads config, labels, preprocesses, processes, and s
   await expect.poll(() => savedLabel?.notes).toBe("approved for local review");
   await expect.poll(() => savedLabel?.session_dir).toBe(sessionDir);
 });
+
+function idleCalibrationStatus() {
+  return {
+    ok: true,
+    active: false,
+    status: "idle",
+    job_id: null,
+    phase: "idle",
+    progress: 0,
+    message: "No calibration job has run.",
+    started_at: null,
+    completed_at: null,
+    candidates: [],
+    warnings: [],
+    recommendation: null,
+    report_path: null,
+    remote_dir: null,
+    local_dir: null,
+    error: null,
+    applied_profile: null,
+  };
+}
+
+function completeCalibrationStatus() {
+  return {
+    ok: true,
+    active: false,
+    status: "complete",
+    job_id: "calibration-test",
+    phase: "recommendation",
+    progress: 1,
+    message: "Calibration recommendation ready.",
+    started_at: "2026-06-21T09:58:00Z",
+    completed_at: "2026-06-21T10:00:00Z",
+    candidates: [{ candidate_id: "candidate_00", label: "best", score: 0.88 }],
+    warnings: [],
+    recommendation: {
+      candidate_id: "candidate_00",
+      label: "best",
+      score: 0.88,
+      confidence: "high",
+      capture: { ...editableConfig.capture, shutter_us: 11000, gain: 1.4, awb: "manual", awb_gains: [2.1, 1.3] },
+      settings_diff: [
+        { field: "shutter_us", before: 0, after: 11000 },
+        { field: "gain", before: 0, after: 1.4 },
+      ],
+      quality: {
+        mean_luma: 0.48,
+        clip_fraction: 0.005,
+        focus_score: 55.2,
+        mask_coverage: 0.24,
+        geometry_confidence: "high",
+        rank: 1,
+        candidate_count: 3,
+      },
+      artifacts: {
+        best_thumbnail: "C:/Iriscope/calibration/cal_test/thumbnails/candidate_00.jpg",
+        baseline_thumbnail: "C:/Iriscope/calibration/cal_test/thumbnails/baseline.jpg",
+      },
+      reasons: ["luma score 1.00"],
+    },
+    report_path: "C:/Iriscope/calibration/cal_test/calibration_report.json",
+    remote_dir: "/home/camera/iriscope/calibration-runs/cal_test",
+    local_dir: "C:/Iriscope/calibration/cal_test",
+    error: null,
+    applied_profile: null,
+  };
+}

@@ -57,6 +57,32 @@ export type ProcessingSettings = {
   quality: QualityThresholds;
 };
 
+export type CalibrationWeights = {
+  luma: number;
+  clipping: number;
+  focus: number;
+  mask: number;
+  color: number;
+  gain: number;
+  metadata: number;
+};
+
+export type CalibrationSettings = {
+  target_luma_min: number;
+  target_luma_max: number;
+  max_clip_fraction: number;
+  sample_budget: number;
+  retain_artifacts: boolean;
+  thumbnail_edge: number;
+  min_shutter_us: number;
+  max_shutter_us: number;
+  min_gain: number;
+  max_gain: number;
+  command_timeout_s: number;
+  scp_timeout_s: number;
+  weights: CalibrationWeights;
+};
+
 export type QualityThresholds = {
   max_clip_fraction: number;
   min_relative_focus: number;
@@ -123,6 +149,7 @@ export type StatusResponse = {
     capture: CaptureSettings;
     preview: PreviewSettings;
     processing: ProcessingSettings;
+    calibration: CalibrationSettings;
   };
   tools: ToolStatus;
   serial_ports: string[];
@@ -172,6 +199,7 @@ export type ConfigPayload = {
     stream_timeout_s: number;
   };
   processing: ProcessingSettings;
+  calibration: CalibrationSettings;
 };
 
 export type ConfigResponse = {
@@ -251,6 +279,69 @@ export type ProcessOptions = {
   max_working_edge: number | null;
   dark_path: string;
   flat_path: string;
+};
+
+export type CalibrationCandidate = {
+  candidate_id: string;
+  label: string;
+  phase: string;
+  score?: number;
+  mean_luma?: number;
+  clip_fraction?: number;
+  focus_score?: number;
+  mask_coverage?: number;
+  geometry_confidence?: "high" | "medium" | "low" | string;
+  thumbnail?: string | null;
+  file?: string | null;
+  component_scores?: Record<string, number>;
+  warnings?: string[];
+};
+
+export type CalibrationRecommendation = {
+  candidate_id: string;
+  label: string;
+  score: number;
+  confidence: "high" | "medium" | "low" | string;
+  capture: ConfigPayload["capture"];
+  settings_diff: Array<{ field: string; before: unknown; after: unknown }>;
+  quality: {
+    mean_luma?: number;
+    clip_fraction?: number;
+    focus_score?: number;
+    mask_coverage?: number;
+    geometry_confidence?: "high" | "medium" | "low" | string;
+    rank?: number;
+    candidate_count?: number;
+  };
+  artifacts: Record<string, string | null | undefined>;
+  reasons: string[];
+};
+
+export type CalibrationStatus = {
+  ok: boolean;
+  active: boolean;
+  status: "idle" | "running" | "complete" | "failed" | "applied" | "reverted" | string;
+  job_id: string | null;
+  phase: string;
+  progress: number;
+  message: string;
+  started_at: string | null;
+  completed_at: string | null;
+  candidates: CalibrationCandidate[];
+  warnings: string[];
+  recommendation: CalibrationRecommendation | null;
+  report_path: string | null;
+  remote_dir: string | null;
+  local_dir: string | null;
+  error: string | null;
+  applied_profile?: Record<string, unknown> | null;
+};
+
+export type CalibrationApplyResponse = {
+  ok: boolean;
+  status: "applied" | "reverted" | string;
+  applied_profile: Record<string, unknown>;
+  config: StatusResponse["config"];
 };
 
 export type WebRTCOfferPayload = {

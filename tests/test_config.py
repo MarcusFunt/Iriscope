@@ -22,6 +22,14 @@ framerate = 10
 [processing]
 stack_method = "median"
 max_working_edge = 640
+
+[calibration]
+target_luma_min = 0.40
+target_luma_max = 0.62
+sample_budget = 8
+
+[calibration.weights]
+focus = 0.22
 """,
         encoding="utf-8",
     )
@@ -40,6 +48,10 @@ max_working_edge = 640
     assert config.processing.stack_method == "median"
     assert config.processing.max_working_edge == 640
     assert config.processing.quality.max_clip_fraction == 0.2
+    assert config.calibration.target_luma_min == 0.40
+    assert config.calibration.target_luma_max == 0.62
+    assert config.calibration.sample_budget == 8
+    assert config.calibration.weights.focus == 0.22
 
 
 def test_load_config_parses_quality_threshold_overrides(tmp_path: Path):

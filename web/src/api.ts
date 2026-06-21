@@ -1,4 +1,6 @@
 import type {
+  CalibrationApplyResponse,
+  CalibrationStatus,
   ConfigPayload,
   ConfigResponse,
   LabelRecord,
@@ -60,6 +62,22 @@ export function processSession(sessionDir: string, options: ProcessOptions) {
 
 export function saveConfig(config: ConfigPayload) {
   return apiPost<ConfigResponse>("/api/config", config);
+}
+
+export function startCalibration() {
+  return apiPost<CalibrationStatus>("/api/calibration/run");
+}
+
+export function getCalibrationStatus() {
+  return apiGet<CalibrationStatus>("/api/calibration/status");
+}
+
+export function applyCalibration() {
+  return apiPost<CalibrationApplyResponse>("/api/calibration/apply");
+}
+
+export function revertCalibration() {
+  return apiPost<CalibrationApplyResponse>("/api/calibration/revert");
 }
 
 export function getLabel(sessionDir: string) {

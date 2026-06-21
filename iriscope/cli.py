@@ -59,6 +59,29 @@ framerate = 12
 quality = 70
 stream_timeout_s = 0
 
+[calibration]
+target_luma_min = 0.38
+target_luma_max = 0.58
+max_clip_fraction = 0.03
+sample_budget = 10
+retain_artifacts = true
+thumbnail_edge = 360
+min_shutter_us = 800
+max_shutter_us = 30000
+min_gain = 1
+max_gain = 8
+command_timeout_s = 60
+scp_timeout_s = 60
+
+[calibration.weights]
+luma = 0.28
+clipping = 0.20
+focus = 0.18
+mask = 0.14
+color = 0.08
+gain = 0.07
+metadata = 0.05
+
 [processing]
 stack_method = "sigma"
 sigma = 2.5

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -100,11 +100,40 @@ class ProcessingSettings:
 
 
 @dataclass(frozen=True)
+class CalibrationWeights:
+    luma: float = 0.28
+    clipping: float = 0.20
+    focus: float = 0.18
+    mask: float = 0.14
+    color: float = 0.08
+    gain: float = 0.07
+    metadata: float = 0.05
+
+
+@dataclass(frozen=True)
+class CalibrationSettings:
+    target_luma_min: float = 0.38
+    target_luma_max: float = 0.58
+    max_clip_fraction: float = 0.03
+    sample_budget: int = 10
+    retain_artifacts: bool = True
+    thumbnail_edge: int = 360
+    min_shutter_us: int = 800
+    max_shutter_us: int = 30000
+    min_gain: float = 1.0
+    max_gain: float = 8.0
+    command_timeout_s: int = 60
+    scp_timeout_s: int = 60
+    weights: CalibrationWeights = field(default_factory=CalibrationWeights)
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     pi: PiConfig = PiConfig()
     capture: CaptureSettings = CaptureSettings()
     preview: PreviewSettings = PreviewSettings()
     processing: ProcessingSettings = ProcessingSettings()
+    calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
 
 
 def load_config(path: str | Path | None = None) -> ProjectConfig:
@@ -120,6 +149,7 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
         capture=_parse_capture(data.get("capture", {})),
         preview=_parse_preview(data.get("preview", {})),
         processing=_parse_processing(data.get("processing", {})),
+        calibration=_parse_calibration(data.get("calibration", {})),
     )
     return _apply_env_overrides(config)
 
@@ -240,6 +270,41 @@ def _parse_processing(data: dict[str, Any]) -> ProcessingSettings:
         save_intermediates=bool(data.get("save_intermediates", True)),
         max_working_edge=_optional_int(data.get("max_working_edge")),
         quality=parse_quality_thresholds(data.get("quality", {})),
+    )
+
+
+def _parse_calibration(data: dict[str, Any]) -> CalibrationSettings:
+    defaults = CalibrationSettings()
+    weights = _parse_calibration_weights(data.get("weights", {}))
+    return CalibrationSettings(
+        target_luma_min=float(data.get("target_luma_min", defaults.target_luma_min)),
+        target_luma_max=float(data.get("target_luma_max", defaults.target_luma_max)),
+        max_clip_fraction=float(data.get("max_clip_fraction", defaults.max_clip_fraction)),
+        sample_budget=int(data.get("sample_budget", defaults.sample_budget)),
+        retain_artifacts=bool(data.get("retain_artifacts", defaults.retain_artifacts)),
+        thumbnail_edge=int(data.get("thumbnail_edge", defaults.thumbnail_edge)),
+        min_shutter_us=int(data.get("min_shutter_us", defaults.min_shutter_us)),
+        max_shutter_us=int(data.get("max_shutter_us", defaults.max_shutter_us)),
+        min_gain=float(data.get("min_gain", defaults.min_gain)),
+        max_gain=float(data.get("max_gain", defaults.max_gain)),
+        command_timeout_s=int(data.get("command_timeout_s", defaults.command_timeout_s)),
+        scp_timeout_s=int(data.get("scp_timeout_s", defaults.scp_timeout_s)),
+        weights=weights,
+    )
+
+
+def _parse_calibration_weights(data: dict[str, Any]) -> CalibrationWeights:
+    defaults = CalibrationWeights()
+    if not data:
+        return defaults
+    return CalibrationWeights(
+        luma=float(data.get("luma", defaults.luma)),
+        clipping=float(data.get("clipping", defaults.clipping)),
+        focus=float(data.get("focus", defaults.focus)),
+        mask=float(data.get("mask", defaults.mask)),
+        color=float(data.get("color", defaults.color)),
+        gain=float(data.get("gain", defaults.gain)),
+        metadata=float(data.get("metadata", defaults.metadata)),
     )
 
 

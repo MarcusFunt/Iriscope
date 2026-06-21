@@ -123,7 +123,7 @@ def capture_remote_session(
 
 
 def capture_remote_calibration(pi: PiConfig, settings: CaptureSettings) -> str:
-    remote_dir = posix_join(pi.remote_root, "calibration")
+    remote_dir = posix_join(pi.remote_root, "calibration", datetime.now().strftime("%Y%m%d_%H%M%S"))
     run_ssh(pi, f"mkdir -p {shlex.quote(remote_dir)}")
     command = build_rpicam_command(
         output_file="test.jpg",
@@ -145,7 +145,7 @@ def pull_remote_session(pi: PiConfig, remote_dir: str, local_parent: Path) -> Pa
     return destination
 
 
-def run_ssh(pi: PiConfig, remote_command: str) -> subprocess.CompletedProcess[str]:
+def run_ssh(pi: PiConfig, remote_command: str, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     args = [
         "ssh",
         "-p",
@@ -154,11 +154,20 @@ def run_ssh(pi: PiConfig, remote_command: str) -> subprocess.CompletedProcess[st
         f"ConnectTimeout={pi.connect_timeout}",
         "-o",
         "StrictHostKeyChecking=accept-new",
+        "-o",
+        "BatchMode=yes",
     ]
     if pi.ssh_key:
         args += ["-i", pi.ssh_key]
     args += [pi.target, remote_command]
-    return subprocess.run(args, check=True, capture_output=True, text=True)
+    return subprocess.run(
+        args,
+        check=True,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout,
+    )
 
 
 def shell_join(args: Iterable[str]) -> str:
